@@ -603,13 +603,58 @@ A policy enforcement:
 @policy → deny [app: untrusted, reason: cloud_not_allowed, scope: global]
 ```
 
-### 13.5 Applications
+### 13.5 Semantic State Deltas
+
+Instead of broadcasting full state, agents emit mutations — the semantic equivalent of `git diff`:
+
+$$\Delta S_t = S_t \ominus S_{t-1}$$
+
+Reconstruction is lossless:
+
+$$S_t = S_0 \oplus \sum_{i=1}^{t} \Delta S_i$$
+
+In SCL, a delta is simply a `mutate` record containing only the changed keys:
+
+```scl
+@agent_04 → mutate [status: idle, queue: job_42]
+```
+
+If a key isn't mentioned, the receiving agents assume the previous value persists. A full state snapshot (verbose, for bootstrapping new agents) uses the `snapshot` verb:
+
+```scl
+@agent_04 → snapshot [status: processing, target: database, memory: optimal, queue: empty]
+```
+
+**Delta streams** are the semantic event log. The stream supports:
+
+- **Time-travel replay**: reconstruct any agent's state at any point by replaying deltas from the nearest checkpoint
+- **Rollback**: rewind to $t=98$, isolate the rogue agent, patch, and replay
+- **Compaction**: squash a range of deltas into a single checkpoint delta
+
+**Merge conflict resolution** handles concurrent mutations from multiple agents using three strategies:
+
+| Strategy | Mechanism | When to Use |
+|----------|-----------|-------------|
+| **LWW** (Last-Writer-Wins) | Latest timestamp wins | General purpose, low contention |
+| **PRIORITY** | Highest agent weight wins, timestamp breaks ties | Supervisor overrides worker |
+| **UNION** (CRDT G-Set) | Set-valued keys merge | Additive operations (model pools, capability sets) |
+
+Vector clocks track causal ordering. When two deltas are concurrent (neither's vector clock dominates), the merge strategy resolves the conflict automatically. The `weight` field on SCLRecord doubles as the agent's priority in conflict resolution.
+
+This architecture gives three superpowers at scale:
+
+1. **Microscopic token footprint.** A delta might be 20 characters. Agents sync thousands of times per minute without hitting context-window bottlenecks.
+2. **Time-travel debugging.** When a swarm of 10,000 agents hits a hallucination loop at $t=100$, roll back the delta stream to isolate the rogue agent.
+3. **Event-sourced consensus.** Agents don't maintain a global state database. They append deltas to a shared log. Consensus = processing the same log in the same order.
+
+### 13.6 Applications
 
 - **Audit logs** in SCL are 3–5× more compact than JSON while remaining human-readable
 - **Model manifests** are expressed as SCL documents and fingerprinted for deduplication
 - **Agent coordination** uses SCL to describe task assignments, file ownership, and interface contracts (see `AGENTS.md`)
 - **Braille encoding** of SCL records provides fixed-width fingerprints for content-addressing
 - **Swarm votes** are SCLRecords with `weight` fields, enabling weighted consensus over structured data
+- **State deltas** enable Git-like synchronization between agents at any scale
 
 ---
 
@@ -755,10 +800,12 @@ The system always functions at whatever level the hardware supports, even if tha
 - **Multi-GPU scheduling**: distribute concurrent tiers across multiple GPUs with VRAM-aware placement
 - **Hardware-specific kernel tuning**: automatic selection of flash attention, paged attention, and speculative decoding based on detected GPU architecture
 - **SCL native audit format**: wire SCL documents and Braille routing signatures into the audit log pipeline, replacing JSON entries
-- **Gossip protocol**: agents broadcast Braille fingerprints to cluster-heads; Hamming distance triggers convergence or escalation
+- **Gossip protocol**: agents broadcast Braille fingerprints of their state deltas to cluster-heads; Hamming distance triggers convergence or escalation; delta streams provide the event-sourced backbone
 - **BFI integration**: bridge the Braille Infinity Token format (from `semantic-compression-language`) with SCLRecords, enabling emotional and morphological channels on SCL state atoms
 - **MCP tool proxy**: bridge Model Context Protocol servers through the tool registry with automatic permission classification
 - **Self-hosting coordination**: use Cortex itself to coordinate parallel agent work, with SCL manifests per task and Braille fingerprints for deduplication
+- **Delta-aware swarm consensus**: swarm participants emit state deltas during deliberation; convergence is detected by fingerprint similarity, not by comparing full outputs
+- **Semantic merge CRDTs**: extend the UNION merge strategy with full CRDT semantics (OR-Set, LWW-Map) for richer conflict-free replication across agent clusters
 
 ---
 
@@ -768,7 +815,7 @@ Cortex reframes LLM inference as an operating system problem. Instead of treatin
 
 The infinity model architecture means the system grows stronger as more models are installed — every new model is a new voice in the cross-family verification choir. The tool registry and policy engine provide the permission model that multi-agent systems have lacked: fine-grained, scoped, auditable control over what AI can do. The resilience layer ensures the system never fails silently — it retries, falls back, and degrades gracefully.
 
-SCL and Braille encoding provide the kernel's native data format: structured, hashable, gossip-ready state atoms that compress routing decisions into 4-character fingerprints and hardware profiles into 8-character manifests. Every inference decision, challenge result, and policy enforcement has a canonical SCL representation and a fixed-width Braille fingerprint — enabling deduplication, convergence checking, and audit compression at any scale.
+SCL and Braille encoding provide the kernel's native data format: structured, hashable, gossip-ready state atoms that compress routing decisions into 4-character fingerprints and hardware profiles into 8-character manifests. Semantic state deltas — the `git diff` for AI thoughts — mean agents broadcast only their mutations, not their entire world-view. With vector clocks for causal ordering, CRDT-style merge resolution for concurrent writes, and delta streams for time-travel debugging, the architecture scales to an infinity of agents the same way Git scales to an infinity of developers: through minimal, composable, conflict-resolvable patches to shared semantic state.
 
 The result is an inference layer that is faster (by routing to the smallest capable model), more reliable (by measuring confidence empirically across model families), more secure (by enforcing permission rings and policies), and universally deployable (by standardizing on GGUF and discovering whatever models are available).
 
