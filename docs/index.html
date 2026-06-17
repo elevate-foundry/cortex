@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cortex — AI as PID 1</title>
+  <meta name="description" content="An AI-native operating system kernel with a self-hosting semantic protocol. SCL + Braille encoding + state deltas.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0a0a0f;
+      --bg-card: #12121a;
+      --bg-input: #1a1a2e;
+      --border: #2a2a3e;
+      --text: #e0e0e8;
+      --text-dim: #8888a0;
+      --accent: #6c63ff;
+      --accent-glow: rgba(108, 99, 255, 0.3);
+      --green: #4ade80;
+      --amber: #fbbf24;
+      --red: #f87171;
+      --braille: #a78bfa;
+      --mono: 'JetBrains Mono', monospace;
+      --sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    body {
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* --- Header --- */
+    .hero {
+      text-align: center;
+      padding: 5rem 2rem 3rem;
+      position: relative;
+    }
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 50%;
+      transform: translateX(-50%);
+      width: 600px; height: 600px;
+      background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+    .hero > * { position: relative; z-index: 1; }
+    .hero h1 {
+      font-size: 3.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 0.5rem;
+    }
+    .hero h1 span { color: var(--accent); }
+    .hero .tagline {
+      font-size: 1.25rem;
+      color: var(--text-dim);
+      max-width: 600px;
+      margin: 0 auto 1.5rem;
+    }
+    .hero .three-things {
+      display: flex;
+      gap: 1.5rem;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 2rem;
+    }
+    .pill {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.5rem 1.25rem;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-dim);
+    }
+    .pill strong { color: var(--text); }
+
+    /* --- Sections --- */
+    section {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 3rem 2rem;
+    }
+    section h2 {
+      font-size: 1.75rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      color: var(--text);
+    }
+    section h2 .num {
+      color: var(--accent);
+      font-family: var(--mono);
+      font-size: 0.9em;
+    }
+    section p, section li {
+      color: var(--text-dim);
+      max-width: 680px;
+    }
+    section p + p { margin-top: 1rem; }
+
+    /* --- Layer cards --- */
+    .layers {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1.5rem;
+      margin-top: 2rem;
+    }
+    @media (min-width: 640px) {
+      .layers { grid-template-columns: 1fr 1fr; }
+    }
+    .layer-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      transition: border-color 0.2s;
+    }
+    .layer-card:hover { border-color: var(--accent); }
+    .layer-card h3 {
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      color: var(--accent);
+      margin-bottom: 0.5rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .layer-card h4 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+    .layer-card p {
+      font-size: 0.9rem;
+      color: var(--text-dim);
+    }
+
+    /* --- Playground --- */
+    .playground {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 2rem;
+      margin-top: 2rem;
+    }
+    .playground-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1.5rem;
+    }
+    @media (min-width: 768px) {
+      .playground-grid { grid-template-columns: 1fr 1fr; }
+    }
+    .playground label {
+      display: block;
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.5rem;
+    }
+    .playground textarea, .playground input[type="text"] {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      padding: 0.75rem 1rem;
+      resize: vertical;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .playground textarea:focus, .playground input:focus {
+      border-color: var(--accent);
+    }
+    .playground textarea { min-height: 120px; }
+    .output-box {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      min-height: 48px;
+      word-break: break-all;
+    }
+    .braille-output {
+      font-size: 1.8rem;
+      letter-spacing: 0.15em;
+      color: var(--braille);
+      text-align: center;
+      padding: 1rem;
+    }
+    .similarity-bar {
+      height: 6px;
+      background: var(--bg-input);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 0.5rem;
+    }
+    .similarity-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.3s, background 0.3s;
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      margin-top: 0.25rem;
+    }
+    .stat-row .val { color: var(--text); font-weight: 600; }
+
+    /* --- Delta viz --- */
+    .delta-viz {
+      margin-top: 1.5rem;
+    }
+    .delta-entry {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0;
+      font-family: var(--mono);
+      font-size: 0.85rem;
+    }
+    .delta-op {
+      font-size: 0.7rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      font-weight: 600;
+      text-transform: uppercase;
+      min-width: 42px;
+      text-align: center;
+    }
+    .delta-op.set { background: rgba(74, 222, 128, 0.15); color: var(--green); }
+    .delta-op.del { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+    .delta-key { color: var(--text-dim); }
+    .delta-val { color: var(--text); }
+
+    /* --- Loop diagram --- */
+    .loop-diagram {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 2rem;
+      margin-top: 2rem;
+      text-align: center;
+    }
+    .loop-nodes {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0;
+      align-items: center;
+    }
+    .loop-node {
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      padding: 0.5rem 1rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+    }
+    .loop-arrow {
+      color: var(--accent);
+      font-size: 1.2rem;
+      padding: 0 0.5rem;
+    }
+
+    /* --- Footer --- */
+    .footer {
+      text-align: center;
+      padding: 3rem 2rem;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
+    .footer a { color: var(--accent); text-decoration: none; }
+    .footer a:hover { text-decoration: underline; }
+
+    /* --- Buttons --- */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      font-size: 0.9rem;
+      padding: 0.6rem 1.5rem;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      text-decoration: none;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-outline {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .btn-outline:hover { border-color: var(--accent); }
+    .btn-group {
+      display: flex;
+      gap: 0.75rem;
+      justify-content: center;
+      margin-top: 2rem;
+    }
+
+    /* --- Tier table --- */
+    .tier-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 1.5rem;
+      font-size: 0.85rem;
+    }
+    .tier-table th, .tier-table td {
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    .tier-table th {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .tier-table td { color: var(--text-dim); }
+    .tier-table td:first-child {
+      font-family: var(--mono);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .hot-badge {
+      font-size: 0.65rem;
+      background: rgba(74, 222, 128, 0.15);
+      color: var(--green);
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ==================== HERO ==================== -->
+  <div class="hero">
+    <h1><span>Cortex</span></h1>
+    <p class="tagline">AI as PID 1 — an AI-native operating system kernel where the inference engine isn't an app, it's <code>init</code>.</p>
+    <div class="three-things">
+      <span class="pill"><strong>Inference Runtime</strong> — L0–L7 tiered routing</span>
+      <span class="pill"><strong>Semantic Protocol</strong> — SCL + Braille encoding</span>
+      <span class="pill"><strong>Self-Hosting</strong> — builds itself with itself</span>
+    </div>
+    <div class="btn-group">
+      <a href="https://github.com/elevate-foundry/cortex" class="btn">GitHub →</a>
+      <a href="#playground" class="btn btn-outline">Try SCL Live ↓</a>
+    </div>
+  </div>
+
+  <!-- ==================== LAYERS ==================== -->
+  <section>
+    <h2><span class="num">01</span> Four Layers</h2>
+    <p>Cortex is not just an inference server. It's a full semantic stack — from hardware detection to agent coordination.</p>
+
+    <div class="layers">
+      <div class="layer-card">
+        <h3>Layer 1</h3>
+        <h4>Inference Runtime</h4>
+        <p>Detects hardware, builds a tiered model hierarchy (L0–L7), routes every request to the smallest capable model. Cross-family verification catches correlated hallucinations.</p>
+      </div>
+      <div class="layer-card">
+        <h3>Layer 2</h3>
+        <h4>Semantic Compression Language</h4>
+        <p>Three primitives — <code>@anchor</code>, <code>→ verb</code>, <code>[scope]</code> — compose into the wire protocol for all agent communication. Machine-parseable, human-readable.</p>
+      </div>
+      <div class="layer-card">
+        <h3>Layer 3</h3>
+        <h4>Braille Encoding</h4>
+        <p>256 Unicode Braille characters (U+2800–U+28FF) map 1:1 to bytes. Fixed-width fingerprints enable O(1) semantic comparison via Hamming distance.</p>
+      </div>
+      <div class="layer-card">
+        <h3>Layer 4</h3>
+        <h4>Semantic State Deltas</h4>
+        <p>Agents broadcast mutations, not full state. <code>ΔS = S_t ⊖ S_{t-1}</code>. Time-travel debugging, CRDT merge, event-sourced consensus. Git for AI thoughts.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== TIER TABLE ==================== -->
+  <section>
+    <h2><span class="num">02</span> Tier System</h2>
+    <p>Like an OS process scheduler — always-hot kernel modules (L0–L2) plus demand-loaded user-space workers (L3–L7).</p>
+    <table class="tier-table">
+      <thead>
+        <tr><th>Tier</th><th>Size</th><th>Role</th><th>TTFT</th><th></th></tr>
+      </thead>
+      <tbody>
+        <tr><td>L0</td><td>0.5–1B</td><td>Router / Reflex</td><td>~10ms</td><td><span class="hot-badge">always hot</span></td></tr>
+        <tr><td>L1</td><td>1–2B</td><td>Syscall Agent</td><td>~20ms</td><td><span class="hot-badge">always hot</span></td></tr>
+        <tr><td>L2</td><td>3–4B</td><td>Local Agent</td><td>~40ms</td><td><span class="hot-badge">always hot</span></td></tr>
+        <tr><td>L3</td><td>7–8B</td><td>Primary Worker</td><td>~60ms</td><td></td></tr>
+        <tr><td>L4</td><td>12–14B</td><td>Heavy Reasoner</td><td>~100ms</td><td></td></tr>
+        <tr><td>L5</td><td>30–32B</td><td>Local Frontier</td><td>~200ms</td><td></td></tr>
+        <tr><td>L6</td><td>64–70B</td><td>Workstation</td><td>~400ms</td><td></td></tr>
+        <tr><td>L7</td><td>Frontier</td><td>Remote Escalation</td><td>~500ms</td><td></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ==================== PLAYGROUND ==================== -->
+  <section id="playground">
+    <h2><span class="num">03</span> SCL Playground</h2>
+    <p>Type SCL below. Watch it parse, encode to Braille, fingerprint, and diff — all in your browser, no backend.</p>
+
+    <div class="playground">
+      <div class="playground-grid">
+        <!-- Input -->
+        <div>
+          <label>SCL Input</label>
+          <textarea id="scl-input" spellcheck="false">@router → select [tier: L3, model: qwen3:8b, confidence: 0.82]
+@challenger → verify [model: granite3.3:8b, agreement: weak_agree]
+@consensus → resolve [confidence: 0.91, families: 3]</textarea>
+        </div>
+        <!-- Parsed output -->
+        <div>
+          <label>Parsed Records</label>
+          <div id="parsed-output" class="output-box"></div>
+        </div>
+      </div>
+
+      <!-- Braille -->
+      <div style="margin-top: 1.5rem;">
+        <label>Braille Fingerprints</label>
+        <div id="braille-output" class="output-box"></div>
+      </div>
+
+      <!-- Document fingerprint -->
+      <div style="margin-top: 1.5rem; display: flex; gap: 1.5rem; flex-wrap: wrap;">
+        <div style="flex: 1; min-width: 200px;">
+          <label>Document Fingerprint</label>
+          <div id="doc-fingerprint" class="braille-output"></div>
+        </div>
+        <div style="flex: 1; min-width: 200px;">
+          <label>Bytes Encoded</label>
+          <div class="stat-row">
+            <span>SCL text</span>
+            <span class="val" id="stat-text-len">—</span>
+          </div>
+          <div class="stat-row">
+            <span>Braille chars</span>
+            <span class="val" id="stat-braille-len">—</span>
+          </div>
+          <div class="stat-row">
+            <span>Compression</span>
+            <span class="val" id="stat-compression">—</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Delta -->
+      <div style="margin-top: 1.5rem;">
+        <label>State Delta (edit the SCL above to see mutations)</label>
+        <div id="delta-output" class="delta-viz">
+          <div style="color: var(--text-dim); font-size: 0.85rem; font-style: italic;">Edit the SCL input to generate deltas…</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== SELF-HOSTING LOOP ==================== -->
+  <section>
+    <h2><span class="num">04</span> The Self-Hosting Loop</h2>
+    <p>The coordination protocol for building Cortex <strong>is</strong> Cortex's semantic substrate. The parser can parse its own coordination file. The fingerprinter can hash its own build artifacts. The delta system can track its own development history.</p>
+
+    <div class="loop-diagram">
+      <div class="loop-nodes">
+        <span class="loop-node">AGENTS.md</span>
+        <span class="loop-arrow">→</span>
+        <span class="loop-node">scl/parser.py</span>
+        <span class="loop-arrow">→</span>
+        <span class="loop-node">braille/fingerprint.py</span>
+        <span class="loop-arrow">→</span>
+        <span class="loop-node">scl/delta.py</span>
+        <span class="loop-arrow">→</span>
+        <span class="loop-node">Cortex router</span>
+        <span class="loop-arrow">→</span>
+        <span class="loop-node">AGENTS.md</span>
+      </div>
+      <p style="margin-top: 1.5rem; font-size: 0.85rem; color: var(--text-dim);">
+        This is not a metaphor. It is the architecture.
+      </p>
+    </div>
+  </section>
+
+  <!-- ==================== FOOTER ==================== -->
+  <div class="footer">
+    <p>
+      <a href="https://github.com/elevate-foundry/cortex">Source</a> ·
+      <a href="https://github.com/elevate-foundry/cortex/blob/main/WHITEPAPER.md">Whitepaper</a> ·
+      <a href="https://github.com/elevate-foundry/cortex/blob/main/AGENTS.md">AGENTS.md</a>
+    </p>
+    <p style="margin-top: 0.5rem;">MIT License · Elevate Foundry</p>
+  </div>
+
+  <!-- ==================== JAVASCRIPT ==================== -->
+  <script>
+    // =================================================================
+    // SCL Parser (browser-native, mirrors src/scl/parser.py)
+    // =================================================================
+    const BRAILLE_BASE = 0x2800;
+
+    function parseSCLRecord(line) {
+      line = line.trim();
+      if (!line || line.startsWith('#') || line.startsWith('//')) return null;
+      if (!line.startsWith('@')) return null;
+
+      // Find arrow
+      let arrowPos = line.indexOf('→');
+      let arrowLen = '→'.length;
+      if (arrowPos === -1) {
+        arrowPos = line.indexOf('->');
+        arrowLen = 2;
+      }
+      if (arrowPos === -1) return null;
+
+      const anchor = line.slice(0, arrowPos).trim();
+      const rest = line.slice(arrowPos + arrowLen).trim();
+
+      const bracketPos = rest.indexOf('[');
+      if (bracketPos === -1) return null;
+
+      const closeBracket = findMatchingBracket(rest, bracketPos);
+      if (closeBracket === -1) return null;
+
+      const verb = rest.slice(0, bracketPos).trim();
+      const scopeStr = rest.slice(bracketPos + 1, closeBracket);
+
+      // Parse scope entries
+      const entries = {};
+      if (scopeStr.trim()) {
+        const parts = splitScopeEntries(scopeStr);
+        for (const part of parts) {
+          const trimmed = part.trim();
+          if (!trimmed) continue;
+          const colonPos = trimmed.indexOf(':');
+          if (colonPos !== -1) {
+            const key = trimmed.slice(0, colonPos).trim();
+            const val = trimmed.slice(colonPos + 1).trim();
+            entries[key] = val;
+          } else {
+            entries[trimmed] = '';
+          }
+        }
+      }
+
+      return { anchor, verb, entries };
+    }
+
+    function findMatchingBracket(text, openPos) {
+      let depth = 0;
+      for (let i = openPos; i < text.length; i++) {
+        if (text[i] === '[') depth++;
+        else if (text[i] === ']') { depth--; if (depth === 0) return i; }
+      }
+      return -1;
+    }
+
+    function splitScopeEntries(text) {
+      const parts = [];
+      let current = '';
+      let depth = 0;
+      for (const ch of text) {
+        if (ch === '[') { depth++; current += ch; }
+        else if (ch === ']') { depth--; current += ch; }
+        else if (ch === ',' && depth === 0) { parts.push(current); current = ''; }
+        else { current += ch; }
+      }
+      if (current) parts.push(current);
+      return parts;
+    }
+
+    // =================================================================
+    // Braille Codec (mirrors src/braille/codec.py)
+    // =================================================================
+    function bytesToBraille(bytes) {
+      return Array.from(bytes).map(b => String.fromCodePoint(BRAILLE_BASE + b)).join('');
+    }
+
+    function brailleToHex(braille) {
+      return Array.from(braille).map(ch => {
+        const b = ch.codePointAt(0) - BRAILLE_BASE;
+        return b.toString(16).padStart(2, '0');
+      }).join('');
+    }
+
+    // =================================================================
+    // Fingerprinting (mirrors src/braille/fingerprint.py)
+    // =================================================================
+    async function sha256(data) {
+      const encoded = new TextEncoder().encode(data);
+      const hashBuffer = await crypto.subtle.digest('SHA-256', encoded);
+      return new Uint8Array(hashBuffer);
+    }
+
+    async function fingerprint(record, width = 4) {
+      // Serialize: anchor + verb + JSON scope
+      const data = `${record.anchor}|${record.verb}|${JSON.stringify(record.entries)}`;
+      const hash = await sha256(data);
+      return bytesToBraille(hash.slice(0, width));
+    }
+
+    async function fingerprintDocument(records, width = 8) {
+      const data = records.map(r =>
+        `${r.anchor}|${r.verb}|${JSON.stringify(r.entries)}`
+      ).join('\n');
+      const hash = await sha256(data);
+      return bytesToBraille(hash.slice(0, width));
+    }
+
+    function hammingSimilarity(fp1, fp2) {
+      if (fp1.length !== fp2.length) return 0;
+      if (!fp1.length) return 1;
+      let matching = 0;
+      const total = fp1.length * 8;
+      for (let i = 0; i < fp1.length; i++) {
+        const b1 = fp1.codePointAt(i) - BRAILLE_BASE;
+        const b2 = fp2.codePointAt(i) - BRAILLE_BASE;
+        const xor = b1 ^ b2;
+        let diffBits = 0;
+        let x = xor;
+        while (x) { diffBits += x & 1; x >>= 1; }
+        matching += 8 - diffBits;
+      }
+      return matching / total;
+    }
+
+    // =================================================================
+    // Delta computation (mirrors src/scl/delta.py diff())
+    // =================================================================
+    function computeDelta(oldRecords, newRecords) {
+      const deltas = [];
+
+      // Index by anchor+verb
+      const oldMap = {};
+      for (const r of oldRecords) {
+        const key = `${r.anchor}|${r.verb}`;
+        oldMap[key] = r.entries;
+      }
+
+      const newMap = {};
+      for (const r of newRecords) {
+        const key = `${r.anchor}|${r.verb}`;
+        newMap[key] = r.entries;
+      }
+
+      const allKeys = new Set([...Object.keys(oldMap), ...Object.keys(newMap)]);
+
+      for (const key of allKeys) {
+        const oldE = oldMap[key] || {};
+        const newE = newMap[key] || {};
+        const allEntryKeys = new Set([...Object.keys(oldE), ...Object.keys(newE)]);
+
+        for (const k of allEntryKeys) {
+          const ov = oldE[k];
+          const nv = newE[k];
+          if (ov === undefined && nv !== undefined) {
+            deltas.push({ op: 'set', key: `${key.split('|')[0]}.${k}`, value: nv });
+          } else if (ov !== undefined && nv === undefined) {
+            deltas.push({ op: 'del', key: `${key.split('|')[0]}.${k}`, value: ov });
+          } else if (ov !== nv) {
+            deltas.push({ op: 'set', key: `${key.split('|')[0]}.${k}`, value: nv, old: ov });
+          }
+        }
+      }
+
+      return deltas;
+    }
+
+    // =================================================================
+    // UI
+    // =================================================================
+    const input = document.getElementById('scl-input');
+    const parsedOut = document.getElementById('parsed-output');
+    const brailleOut = document.getElementById('braille-output');
+    const docFpOut = document.getElementById('doc-fingerprint');
+    const deltaOut = document.getElementById('delta-output');
+    const statText = document.getElementById('stat-text-len');
+    const statBraille = document.getElementById('stat-braille-len');
+    const statCompression = document.getElementById('stat-compression');
+
+    let previousRecords = [];
+
+    async function update() {
+      const text = input.value;
+      const lines = text.split('\n');
+      const records = lines.map(parseSCLRecord).filter(Boolean);
+
+      // Parsed output
+      if (records.length === 0) {
+        parsedOut.innerHTML = '<span style="color: var(--text-dim); font-style: italic;">No valid SCL records</span>';
+        brailleOut.innerHTML = '';
+        docFpOut.textContent = '';
+        return;
+      }
+
+      let parsedHtml = '';
+      const fingerprints = [];
+      for (const r of records) {
+        const fp = await fingerprint(r);
+        fingerprints.push(fp);
+        const scopeStr = Object.entries(r.entries)
+          .map(([k, v]) => v ? `${k}: ${v}` : k)
+          .join(', ');
+        parsedHtml += `<div style="margin-bottom: 0.4rem;">
+          <span style="color: var(--accent)">${r.anchor}</span>
+          <span style="color: var(--text-dim)"> → </span>
+          <span style="color: var(--text)">${r.verb}</span>
+          <span style="color: var(--text-dim)"> [${scopeStr}]</span>
+        </div>`;
+      }
+      parsedOut.innerHTML = parsedHtml;
+
+      // Braille fingerprints
+      let brailleHtml = '';
+      for (let i = 0; i < records.length; i++) {
+        const hex = brailleToHex(fingerprints[i]);
+        brailleHtml += `<div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 0.4rem;">
+          <span style="color: var(--braille); font-size: 1.4rem; letter-spacing: 0.15em; min-width: 5rem;">${fingerprints[i]}</span>
+          <span style="color: var(--text-dim); font-size: 0.8rem;">${records[i].anchor} → ${records[i].verb}</span>
+          <span style="color: var(--text-dim); font-size: 0.75rem; opacity: 0.5;">(${hex})</span>
+        </div>`;
+      }
+      brailleOut.innerHTML = brailleHtml;
+
+      // Document fingerprint
+      const docFp = await fingerprintDocument(records);
+      docFpOut.textContent = docFp;
+
+      // Stats
+      const textBytes = new TextEncoder().encode(text).length;
+      const brailleChars = fingerprints.join('').length;
+      statText.textContent = `${textBytes} bytes`;
+      statBraille.textContent = `${brailleChars * records.length} chars`;
+      const ratio = ((brailleChars * records.length * 3) / textBytes * 100).toFixed(1);
+      statCompression.textContent = `${ratio}% (fingerprints vs source)`;
+
+      // Delta
+      const deltas = computeDelta(previousRecords, records);
+      if (deltas.length === 0) {
+        deltaOut.innerHTML = '<div style="color: var(--text-dim); font-size: 0.85rem; font-style: italic;">No changes detected</div>';
+      } else {
+        let deltaHtml = '';
+        for (const d of deltas) {
+          const opClass = d.op === 'set' ? 'set' : 'del';
+          const opLabel = d.op === 'set' ? (d.old !== undefined ? 'SET' : '+') : '−';
+          const valDisplay = d.op === 'set'
+            ? (d.old !== undefined
+              ? `<span style="text-decoration: line-through; opacity: 0.4;">${d.old}</span> → ${d.value}`
+              : d.value)
+            : `<span style="text-decoration: line-through; opacity: 0.5;">${d.value}</span>`;
+          deltaHtml += `<div class="delta-entry">
+            <span class="delta-op ${opClass}">${opLabel}</span>
+            <span class="delta-key">${d.key}:</span>
+            <span class="delta-val">${valDisplay}</span>
+          </div>`;
+        }
+        deltaOut.innerHTML = deltaHtml;
+      }
+
+      previousRecords = records;
+    }
+
+    input.addEventListener('input', update);
+    update();
+  </script>
+
+</body>
+</html>
