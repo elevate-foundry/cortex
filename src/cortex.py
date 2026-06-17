@@ -274,10 +274,23 @@ class Cortex:
         if adapter is None:
             return None
 
+        # For reflex tiers (L0-L2), suppress Qwen3 thinking mode to save
+        # tokens and reduce latency — these are fast lookups, not reasoning.
+        gen_messages = list(messages)
+        if tier.value <= Tier.L2.value:
+            if not any(m.get("role") == "system" for m in gen_messages):
+                gen_messages.insert(0, {"role": "system", "content": "/no_think"})
+
+        # Keep hot models (L0-L2) pinned in VRAM
+        extra = {}
+        if TIER_SPECS[tier].always_hot:
+            extra["keep_alive"] = "24h"
+
         req = CompletionRequest(
-            messages=messages,
+            messages=gen_messages,
             max_tokens=max_tokens,
             temperature=0.0,
+            extra=extra,
         )
 
         try:
@@ -299,6 +312,53 @@ class Cortex:
             if resp is not None:
                 return tier, resp
         return current_tier, None
+
+    # ------------------------------------------------------------------
+    # Streaming support
+    # ------------------------------------------------------------------
+
+    def resolve_backend(
+        self,
+        messages: list[dict],
+    ) -> tuple[RouteDecision, Tier, "BackendAdapter", str]:
+        """
+        Route a request and return the adapter + model for streaming.
+        
+        Returns (route_decision, tier, adapter, model_tag).
+        The caller can use the adapter directly for streaming calls.
+        """
+        if not self._booted:
+            self.boot()
+
+        prompt = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                prompt = msg.get("content", "")
+                break
+
+        route = self._route(prompt)
+        tier = route.tier
+
+        adapter = self.manager.get_adapter(tier)
+        if adapter is None:
+            from .tiers import get_models_for_tier
+            models = get_models_for_tier(tier, self.profile)
+            if models:
+                loaded = self.manager.load_model(tier, models[0])
+                if loaded and loaded.state == ModelState.READY:
+                    adapter = loaded.adapter
+
+        # Fall back to any available tier
+        if adapter is None:
+            for tier_val in range(self._max_tier.value, -1, -1):
+                fallback_tier = Tier(tier_val)
+                adapter = self.manager.get_adapter(fallback_tier)
+                if adapter is not None:
+                    tier = fallback_tier
+                    break
+
+        model_tag = adapter.default_model if adapter else ""
+        return route, tier, adapter, model_tag
 
     # ------------------------------------------------------------------
     # Status

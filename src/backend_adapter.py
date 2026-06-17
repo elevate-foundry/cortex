@@ -140,6 +140,9 @@ class BackendAdapter:
             }
             if req.stop:
                 payload["options"]["stop"] = req.stop
+            # Forward extra Ollama-specific fields (keep_alive, etc.)
+            if req.extra.get("keep_alive"):
+                payload["keep_alive"] = req.extra["keep_alive"]
         else:
             payload = {
                 "model": model,
