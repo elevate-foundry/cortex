@@ -82,8 +82,8 @@ class DaemonServer:
         self.host = host
         self.port = port
         self.profile = profile or detect_system()
-        self.cortex = Cortex(profile=self.profile)
         self.memory = Memory()
+        self.cortex = Cortex(profile=self.profile, memory=self.memory)
         self.tools = ToolRegistry()
         self.policy = PolicyEngine(self.memory)
         self.resilience = ResilienceLayer()

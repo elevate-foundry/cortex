@@ -31,6 +31,7 @@ from .router import RouteDecision, route_heuristic, route_with_model
 from .swarm import Swarm, SwarmResult, SwarmSize, AggregationMethod
 from .tiers import Tier, TIER_SPECS, assess_tiers, max_feasible_tier
 from .hardware_detect import SystemProfile, detect_system
+from .memory import Memory
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +80,11 @@ class Cortex:
         self,
         profile: Optional[SystemProfile] = None,
         config: Optional[CortexConfig] = None,
+        memory: Optional["Memory"] = None,
     ):
         self.config = config or CortexConfig()
         self.profile = profile or detect_system()
+        self.memory = memory  # optional — set externally (e.g. by daemon)
 
         # Initialize subsystems
         manager_config = self.config.manager_config or ManagerConfig()
@@ -207,7 +210,7 @@ class Cortex:
 
         total_ms = (time.monotonic() - t0) * 1000
 
-        return CortexResponse(
+        result = CortexResponse(
             content=core_response.content,
             tier_used=tier,
             model_used=core_response.model,
@@ -218,6 +221,28 @@ class Cortex:
             escalation_path=escalation_path,
             total_ms=total_ms,
         )
+
+        # Self-audit: log routing decision to Memory if available
+        if self.memory is not None:
+            try:
+                self.memory.log_request(
+                    thread_id="",
+                    request_model="auto",
+                    routed_tier=tier.name,
+                    actual_model=core_response.model,
+                    category=route.category.value,
+                    confidence=effective_confidence,
+                    tokens_prompt=0,
+                    tokens_completion=core_response.tokens_generated,
+                    latency_ms=total_ms,
+                    ttft_ms=core_response.ttft_ms,
+                    status_code=200,
+                    escalation_path=escalation_path,
+                )
+            except Exception:
+                pass  # never fail a request due to audit
+
+        return result
 
     # ------------------------------------------------------------------
     # Internal methods
