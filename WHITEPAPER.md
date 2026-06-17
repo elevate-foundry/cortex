@@ -565,7 +565,25 @@ document   := record ('\n' record)*
 - `→` — **Relation.** Verb, transition, causality.
 - `[ ]` — **Scope.** Bounded context frame. Key-value attributes.
 
-### 13.3 Examples
+### 13.3 Core Types
+
+SCL is implemented as five frozen dataclasses in `src/scl/types.py`:
+
+| Type | Description | Serialization |
+|------|-------------|---------------|
+| `Anchor` | `@name` — the entity being described | `.to_text()`, `.to_bytes()`, `.to_dict()` |
+| `Relation` | `→ verb` — the action or transition | `.to_text()`, `.to_bytes()`, `.to_dict()` |
+| `Scope` | `[k: v, ...]` — bounded context frame | `.to_text()`, `.to_bytes()` (JSON), `.to_dict()` |
+| `SCLRecord` | One complete statement: anchor + relation + scope | All formats + `.content_hash()` |
+| `SCLDocument` | Ordered collection of records with metadata | All formats + `.filter_by_anchor()`, `.filter_by_verb()` |
+
+Every type supports four serialization round-trips: text ↔ type ↔ bytes ↔ dict. The binary format uses length-prefixed fields (`struct.pack(">H")`) for efficient prefix parsing. Content hashes (SHA-256) exclude timestamps, making them stable across time for deduplication.
+
+`SCLRecord` carries two fields beyond the grammar:
+- **`weight: float`** — used by swarm consensus to weight votes
+- **`parent_id: Optional[str]`** — DAG linkage for gossip chains
+
+### 13.4 Examples
 
 A routing decision:
 ```scl
@@ -585,18 +603,95 @@ A policy enforcement:
 @policy → deny [app: untrusted, reason: cloud_not_allowed, scope: global]
 ```
 
-### 13.4 Applications
+### 13.5 Applications
 
 - **Audit logs** in SCL are 3–5× more compact than JSON while remaining human-readable
-- **Model manifests** can be expressed as SCL documents and fingerprinted for deduplication
+- **Model manifests** are expressed as SCL documents and fingerprinted for deduplication
 - **Agent coordination** uses SCL to describe task assignments, file ownership, and interface contracts (see `AGENTS.md`)
 - **Braille encoding** of SCL records provides fixed-width fingerprints for content-addressing
+- **Swarm votes** are SCLRecords with `weight` fields, enabling weighted consensus over structured data
 
 ---
 
-## 14. Performance Characteristics
+## 14. Braille Encoding Layer
 
-### 14.1 TTFT Optimization
+### 14.1 The Codec
+
+The 256 Unicode Braille characters (U+2800 to U+28FF) map bijectively to byte values 0x00–0xFF. Each character's codepoint offset from U+2800 *is* the byte value. This gives a natural, lossless encoding with fixed density: 1 byte = 1 Braille character.
+
+```
+0x00 → ⠀ (blank)    0x41 ('A') → ⡁    0xFF → ⣿ (all 8 dots raised)
+```
+
+The codec (`src/braille/codec.py`) provides:
+
+| Function | Description |
+|----------|-------------|
+| `encode(bytes) → str` | Bytes to Braille string |
+| `decode(str) → bytes` | Braille string back to bytes |
+| `encode_hex(str) → str` | Hex string to Braille |
+| `encode_int(n, width) → str` | Integer to fixed-width Braille |
+| `decode_int(str) → int` | Braille back to integer |
+| `is_braille(char) → bool` | Check if character is in U+2800–U+28FF |
+
+Token efficiency: most LLM tokenizers treat Braille characters as single tokens or small multi-byte sequences, making this encoding competitive with or better than hex/base64 for transmitting binary data through language models.
+
+### 14.2 Fingerprinting
+
+The fingerprint module (`src/braille/fingerprint.py`) maps SCL records to fixed-width Braille hashes:
+
+1. Serialize record to canonical bytes via `record.to_bytes()`
+2. SHA-256 hash
+3. Truncate to `width` bytes (default: 4 bytes = 32 bits)
+4. Encode as Braille
+
+Result: a 4-character Braille string that uniquely identifies the semantic content of any SCL record.
+
+```python
+fingerprint(SCLRecord(Anchor('router'), Relation('select'),
+            Scope({'model': 'qwen3:4b'})))  # → '⢍⠱⡈⠦'
+```
+
+**Convergence checking** uses Hamming distance between fingerprints:
+
+| Similarity | Interpretation | Action |
+|------------|---------------|--------|
+| > 0.9 | Agents agree | No action |
+| 0.5–0.9 | Partial agreement | Verification needed |
+| < 0.5 | Disagreement | Trigger challenger/swarm |
+
+At scale, agents broadcast fingerprints (4 chars) instead of full state. Cluster-heads aggregate fingerprints for sub-swarms. This reduces gossip bandwidth by orders of magnitude.
+
+### 14.3 Manifests
+
+The manifest module (`src/braille/manifest.py`) encodes system and routing state as fixed-width Braille strings:
+
+**Routing signature** (4 chars = 32 bits):
+```
+[tier:1][category:1][confidence:1][flags:1]
+```
+
+Every routing decision compresses to exactly 4 Braille characters — a complete audit entry in 12 UTF-8 bytes.
+
+**System manifest** (8 chars = 64 bits):
+```
+[os:1][arch:1][accel:1][vram_gb:1][ram_gb:1][cores:1][max_tier:1][backends:1]
+```
+
+An entire hardware profile in 8 characters. Two machines can be compared by visual inspection of their manifests.
+
+**Tier manifest** (6 chars = 48 bits):
+```
+[tier:1][param_min:1][param_max:1][vram_req:1][always_hot:1][feasible:1]
+```
+
+All manifests round-trip through `encode` / `decode` functions, providing both compact storage and human-readable Braille visualization.
+
+---
+
+## 15. Performance Characteristics
+
+### 15.1 TTFT Optimization
 
 Time-to-first-token is the critical latency metric. Cortex optimizes TTFT through:
 
@@ -606,7 +701,7 @@ Time-to-first-token is the critical latency metric. Cortex optimizes TTFT throug
 4. **Quantization**: 4-bit quantization (Q4_K_M) reduces memory footprint and speeds inference
 5. **Thinking suppression**: for reflex tiers (L0–L2), Qwen3's thinking mode is suppressed via `/no_think` to avoid wasting tokens on internal reasoning
 
-### 14.2 Platform-Specific Performance
+### 15.2 Platform-Specific Performance
 
 | Platform | GPU | Backend | Expected TTFT |
 |----------|-----|---------|---------------|
@@ -616,7 +711,7 @@ Time-to-first-token is the critical latency metric. Cortex optimizes TTFT throug
 | Linux | AMD RX 7900 | llama.cpp (ROCm) | 40–100ms |
 | Any | CPU only | llama.cpp (AVX2/NEON) | 200–2000ms |
 
-### 14.3 Graceful Degradation
+### 15.3 Graceful Degradation
 
 Cortex adapts to available hardware:
 
@@ -629,7 +724,7 @@ The system always functions at whatever level the hardware supports, even if tha
 
 ---
 
-## 15. Design Principles
+## 16. Design Principles
 
 1. **Start small.** Route to the smallest model likely to handle the task. Escalate only on evidence of insufficient capability.
 
@@ -651,7 +746,7 @@ The system always functions at whatever level the hardware supports, even if tha
 
 ---
 
-## 16. Future Work
+## 17. Future Work
 
 - **LLM-as-judge aggregation**: replace text-overlap comparison in the swarm with a small judge model for more nuanced agreement detection
 - **Persistent credibility scoring**: track which models consistently agree with eventual consensus and weight their votes accordingly over time
@@ -659,18 +754,21 @@ The system always functions at whatever level the hardware supports, even if tha
 - **Adaptive routing**: use audit log data to fine-tune the L0 router based on observed outcomes
 - **Multi-GPU scheduling**: distribute concurrent tiers across multiple GPUs with VRAM-aware placement
 - **Hardware-specific kernel tuning**: automatic selection of flash attention, paged attention, and speculative decoding based on detected GPU architecture
-- **SCL native audit format**: replace JSON audit log entries with SCL documents for 3–5× compression
-- **Braille fingerprinting**: content-address model outputs and routing decisions using fixed-width Braille Unicode hashes for deduplication and manifest tracking
+- **SCL native audit format**: wire SCL documents and Braille routing signatures into the audit log pipeline, replacing JSON entries
+- **Gossip protocol**: agents broadcast Braille fingerprints to cluster-heads; Hamming distance triggers convergence or escalation
+- **BFI integration**: bridge the Braille Infinity Token format (from `semantic-compression-language`) with SCLRecords, enabling emotional and morphological channels on SCL state atoms
 - **MCP tool proxy**: bridge Model Context Protocol servers through the tool registry with automatic permission classification
 - **Self-hosting coordination**: use Cortex itself to coordinate parallel agent work, with SCL manifests per task and Braille fingerprints for deduplication
 
 ---
 
-## 17. Conclusion
+## 18. Conclusion
 
 Cortex reframes LLM inference as an operating system problem. Instead of treating models as isolated applications, it treats them as a tiered hierarchy of kernel services — always available, resource-managed, and self-verifying. The L0 router acts as PID 1, the challenge system provides cross-family confidence checks, and the swarm offers consensus for the hardest problems.
 
 The infinity model architecture means the system grows stronger as more models are installed — every new model is a new voice in the cross-family verification choir. The tool registry and policy engine provide the permission model that multi-agent systems have lacked: fine-grained, scoped, auditable control over what AI can do. The resilience layer ensures the system never fails silently — it retries, falls back, and degrades gracefully.
+
+SCL and Braille encoding provide the kernel's native data format: structured, hashable, gossip-ready state atoms that compress routing decisions into 4-character fingerprints and hardware profiles into 8-character manifests. Every inference decision, challenge result, and policy enforcement has a canonical SCL representation and a fixed-width Braille fingerprint — enabling deduplication, convergence checking, and audit compression at any scale.
 
 The result is an inference layer that is faster (by routing to the smallest capable model), more reliable (by measuring confidence empirically across model families), more secure (by enforcing permission rings and policies), and universally deployable (by standardizing on GGUF and discovering whatever models are available).
 
