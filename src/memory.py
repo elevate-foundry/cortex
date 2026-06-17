@@ -34,6 +34,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, Any, Iterator
 
+from .config import DATA_DIR, DB_PATH
+
 logger = logging.getLogger("cortex.memory")
 
 
@@ -43,11 +45,11 @@ logger = logging.getLogger("cortex.memory")
 
 def default_data_dir() -> Path:
     """~/.cortex/ — the kernel's persistent state directory."""
-    return Path(os.environ.get("CORTEX_DATA_DIR", Path.home() / ".cortex"))
+    return DATA_DIR
 
 
 def default_db_path() -> Path:
-    return default_data_dir() / "cortex.db"
+    return DB_PATH
 
 
 # ---------------------------------------------------------------------------

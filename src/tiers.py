@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Optional
 
+from .config import OLLAMA_URL, vram_budget_mb
 from .hardware_detect import AcceleratorType, SystemProfile
 
 
@@ -471,7 +472,7 @@ _SKIP_PATTERNS = {"nomic-embed", "embed"}
 
 
 def discover_ollama_models(
-    ollama_url: str = "http://localhost:11434",
+    ollama_url: str = "",
 ) -> dict[Tier, list[TierModel]]:
     """
     Query Ollama's /api/tags endpoint and map installed models to tiers.
@@ -483,6 +484,7 @@ def discover_ollama_models(
     your local llama3.3:70b, phi4, deepseek-r1, gemma3:4b, etc.
     """
     import urllib.request
+    ollama_url = ollama_url or OLLAMA_URL
 
     try:
         req = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
@@ -710,14 +712,10 @@ def assess_tiers(profile: SystemProfile) -> list[TierFeasibility]:
     optional NVIDIA+vLLM AWQ overrides when available.
     """
     accel = profile.primary_accelerator
-    # For Apple Silicon, unified memory means GPU can use most of RAM
-    if accel == AcceleratorType.APPLE_METAL:
-        available_vram = int(profile.memory.total_mb * 0.75)
-    elif profile.gpus:
-        available_vram = profile.total_vram_mb
-    else:
-        # CPU-only: use ~60% of RAM
-        available_vram = int(profile.memory.total_mb * 0.60)
+    is_unified = accel == AcceleratorType.APPLE_METAL
+    has_gpu = bool(profile.gpus)
+    total = profile.total_vram_mb if has_gpu and not is_unified else profile.memory.total_mb
+    available_vram = vram_budget_mb(total, has_gpu=has_gpu, is_unified=is_unified)
 
     results: list[TierFeasibility] = []
 
@@ -817,12 +815,10 @@ def concurrent_vram_budget(profile: SystemProfile) -> dict:
       - remaining_vram: leftover for KV cache / context
     """
     accel = profile.primary_accelerator
-    if accel == AcceleratorType.APPLE_METAL:
-        total = int(profile.memory.total_mb * 0.75)
-    elif profile.gpus:
-        total = profile.total_vram_mb
-    else:
-        total = int(profile.memory.total_mb * 0.60)
+    is_unified = accel == AcceleratorType.APPLE_METAL
+    has_gpu = bool(profile.gpus)
+    raw_total = profile.total_vram_mb if has_gpu and not is_unified else profile.memory.total_mb
+    total = vram_budget_mb(raw_total, has_gpu=has_gpu, is_unified=is_unified)
 
     assessments = assess_tiers(profile)
     feasible = [a for a in assessments if a.feasible and a.spec.local and a.model]

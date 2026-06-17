@@ -33,6 +33,7 @@ from .tiers import (
     assess_tiers,
     concurrent_vram_budget,
 )
+from .config import OLLAMA_URL, vram_budget_mb
 from .hardware_detect import SystemProfile
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,7 @@ class LoadedModel:
 @dataclass
 class ManagerConfig:
     """Configuration for the model manager."""
-    ollama_url: str = "http://localhost:11434"
+    ollama_url: str = OLLAMA_URL
     llama_cpp_url: str = "http://localhost:8080"
     vllm_url: str = "http://localhost:8000"
     preferred_backend: BackendType = BackendType.OLLAMA
@@ -94,12 +95,10 @@ class ModelManager:
     def _compute_vram_budget(self) -> int:
         """Compute total VRAM budget based on hardware."""
         from .hardware_detect import AcceleratorType
-        if self.profile.primary_accelerator == AcceleratorType.APPLE_METAL:
-            return int(self.profile.memory.total_mb * 0.75)
-        elif self.profile.gpus:
-            return self.profile.total_vram_mb
-        else:
-            return int(self.profile.memory.total_mb * 0.60)
+        is_unified = self.profile.primary_accelerator == AcceleratorType.APPLE_METAL
+        has_gpu = bool(self.profile.gpus)
+        total = self.profile.total_vram_mb if has_gpu and not is_unified else self.profile.memory.total_mb
+        return vram_budget_mb(total, has_gpu=has_gpu, is_unified=is_unified)
 
     def _model_key(self, tier: Tier, model: TierModel) -> str:
         return f"{tier.name}:{model.model_id}"

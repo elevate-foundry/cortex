@@ -31,6 +31,7 @@ try:
 except ImportError:
     pass
 
+from .config import OLLAMA_URL
 from .tiers import Tier, TierModel
 
 
@@ -89,13 +90,13 @@ class BackendAdapter:
     def __init__(
         self,
         backend: BackendType,
-        base_url: str = "http://localhost:11434",
+        base_url: str = "",
         api_key: str = "",
         default_model: str = "",
         timeout_s: float = 60.0,
     ):
         self.backend = backend
-        self.base_url = base_url.rstrip("/")
+        self.base_url = (base_url or OLLAMA_URL).rstrip("/")
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.default_model = default_model
         self.timeout_s = timeout_s
@@ -370,7 +371,7 @@ class BackendAdapter:
 
 def ollama_adapter(
     model: str = "",
-    base_url: str = "http://localhost:11434",
+    base_url: str = "",
 ) -> BackendAdapter:
     """Create an adapter for a local Ollama instance."""
     return BackendAdapter(
