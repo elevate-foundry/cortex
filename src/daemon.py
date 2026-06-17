@@ -31,7 +31,6 @@ Managed backends:
 import asyncio
 import json
 import logging
-import os
 import signal
 import sys
 import time
@@ -45,13 +44,14 @@ from .tiers import (
     get_models_for_tier,
 )
 from .api_adapter import (
-    APIFormat,
-    NormalizedRequest,
     normalize_request,
     format_response,
 )
-from .cortex import Cortex, CortexConfig, CortexResponse
+from .cortex import Cortex, CortexResponse
 from .memory import Memory
+from .tools import ToolRegistry
+from .policy import PolicyEngine, PolicyContext
+from .resilience import ResilienceLayer
 
 logger = logging.getLogger("cortex")
 
@@ -84,6 +84,9 @@ class DaemonServer:
         self.profile = profile or detect_system()
         self.cortex = Cortex(profile=self.profile)
         self.memory = Memory()
+        self.tools = ToolRegistry()
+        self.policy = PolicyEngine(self.memory)
+        self.resilience = ResilienceLayer()
         self.start_time = 0.0
         self.request_count = 0
 
@@ -220,6 +223,12 @@ class DaemonServer:
                 await self._handle_set_policy(writer, body)
             elif path == "/v1/policies" and method == "GET":
                 await self._handle_get_policies(writer, headers)
+            elif path == "/v1/tools" and method == "GET":
+                await self._handle_tools_list(writer)
+            elif path == "/v1/resilience" and method == "GET":
+                await self._handle_resilience_status(writer)
+            elif path == "/v1/resilience/reset" and method == "POST":
+                await self._handle_resilience_reset(writer, body)
             else:
                 await self._send_json(writer, 404, {
                     "error": {"message": f"Not found: {path}", "type": "invalid_request"}
@@ -266,10 +275,30 @@ class DaemonServer:
         )
 
         # --- Memory: resolve thread ---
-        # Clients can pass thread_id in the request body (metadata field)
-        # to maintain conversation state across calls.
         thread_id = request_body.get("thread_id", request_body.get("metadata", {}).get("thread_id", ""))
         app_id = headers.get("x-app-id", request_body.get("metadata", {}).get("app_id", ""))
+
+        # --- Policy check ---
+        tool_names = [t.get("function", {}).get("name", "") for t in (normalized.tools or []) if t.get("type") == "function"]
+        policy_ctx = PolicyContext(
+            app_id=app_id,
+            thread_id=thread_id,
+            requested_model=normalized.model,
+            max_tokens=normalized.max_tokens,
+            has_tools=bool(normalized.tools),
+            tool_names=tool_names,
+        )
+        policy_decision = self.policy.check(policy_ctx)
+        if policy_decision.denied:
+            logger.warning("Policy denied: %s", policy_decision.reason)
+            await self._send_json(writer, 403, {
+                "error": {"message": policy_decision.reason, "type": "policy_denied"}
+            })
+            return
+
+        # Apply policy adjustments
+        if policy_decision.effective_max_tokens < normalized.max_tokens:
+            normalized.max_tokens = policy_decision.effective_max_tokens
 
         if thread_id:
             thread = self.memory.get_or_create_thread(
@@ -683,12 +712,38 @@ class DaemonServer:
             ],
         })
 
+    # ------------------------------------------------------------------
+    # Tools & Resilience endpoints
+    # ------------------------------------------------------------------
+
+    async def _handle_tools_list(self, writer):
+        """GET /v1/tools — list all registered tools."""
+        await self._send_json(writer, 200, self.tools.status())
+
+    async def _handle_resilience_status(self, writer):
+        """GET /v1/resilience — circuit breaker status."""
+        await self._send_json(writer, 200, self.resilience.status())
+
+    async def _handle_resilience_reset(self, writer, body: bytes):
+        """POST /v1/resilience/reset — reset circuit breakers."""
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            data = {}
+        name = data.get("circuit", "")
+        if name:
+            ok = self.resilience.reset_circuit(name)
+            await self._send_json(writer, 200, {"status": "ok" if ok else "not_found", "circuit": name})
+        else:
+            count = self.resilience.reset_all()
+            await self._send_json(writer, 200, {"status": "ok", "circuits_reset": count})
+
     async def _send_json(self, writer, status: int, data):
         """Send a JSON HTTP response."""
         body = json.dumps(data).encode()
-        status_text = {200: "OK", 400: "Bad Request", 404: "Not Found",
-                       500: "Internal Server Error", 502: "Bad Gateway",
-                       503: "Service Unavailable"}.get(status, "Unknown")
+        status_text = {200: "OK", 400: "Bad Request", 403: "Forbidden",
+                       404: "Not Found", 500: "Internal Server Error",
+                       502: "Bad Gateway", 503: "Service Unavailable"}.get(status, "Unknown")
         header = (
             f"HTTP/1.1 {status} {status_text}\r\n"
             f"Content-Type: application/json\r\n"
