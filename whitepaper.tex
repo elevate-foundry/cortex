@@ -1,0 +1,608 @@
+\documentclass[11pt, a4paper, twocolumn]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, calc}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{caption}
+\usepackage{tabularx}
+\usepackage{float}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!70!black,
+}
+
+\titleformat{\section}{\large\bfseries}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textit{Cortex: AI as PID 1}}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% Custom commands
+\newcommand{\tier}[1]{\texttt{L#1}}
+\newcommand{\conf}{\mathcal{C}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\family}{\mathcal{F}}
+\newcommand{\model}{\mathcal{M}}
+
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+
+\title{
+    \vspace{-1.5em}
+    \textbf{Cortex: AI as PID 1} \\[0.5em]
+    \large An AI-Native Operating System Kernel Where the \\
+    Inference Engine Isn't an App --- It's \texttt{init}
+}
+
+\author{
+    Elevate Foundry \\
+    \texttt{github.com/elevate-foundry}
+}
+
+\date{June 2025}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{fancy}
+
+% ================================================================
+% ABSTRACT
+% ================================================================
+\begin{abstract}
+Modern AI-assisted computing treats large language models as user-space applications: launched on demand, isolated from the system, and discarded after use. This mirrors the pre-Unix era, where every program implemented its own I/O routines. We propose \textbf{Cortex}, an architecture in which the LLM inference engine operates as PID~1 --- the always-running, kernel-adjacent process that mediates between user and hardware. Cortex constructs a tiered model hierarchy $\tier{0}$--$\tier{7}$, routes each request to the smallest model capable of handling it via an L0 classifier, and escalates through cross-family challenge and multi-model swarm consensus when confidence is insufficient. We formalize the routing function, define a cross-family confidence metric grounded in independent failure probabilities, and describe the swarm aggregation mechanism. The system runs on any hardware via a GGUF-first format strategy and presents a universal API compatible with OpenAI, Anthropic, and tool-calling clients.
+\end{abstract}
+
+% ================================================================
+% 1. INTRODUCTION
+% ================================================================
+\section{Introduction}
+
+\subsection{The Problem}
+
+Let $\model$ be a language model and $x$ a user request. Standard deployment routes every $x$ to a single, typically maximal, model $\model_{\max}$:
+
+\begin{equation}
+    y = \model_{\max}(x) \quad \forall\, x
+\end{equation}
+
+This has three structural inefficiencies:
+
+\begin{enumerate}[leftmargin=*, nosep]
+    \item \textbf{Overprovisioning.} A classification task ($|x| < 50$ tokens) consumes the same compute as a multi-step coding task. The expected compute is $\mathbb{E}[\text{cost}] = c(\model_{\max})$ regardless of task complexity.
+    \item \textbf{Cold starts.} Models load on demand. Time-to-first-token (TTFT) is dominated by load time $t_{\text{load}} \gg t_{\text{infer}}$, making LLMs unsuitable as system-level services.
+    \item \textbf{Unverified confidence.} The output $y$ has no external check. Self-consistency (sampling $y_1, \ldots, y_k \sim \model_{\max}$) provides limited value: copies of the same model share blind spots.
+\end{enumerate}
+
+\subsection{The Thesis}
+
+An operating system does not load its process scheduler on demand. Cortex applies this principle to inference. Let $\mathcal{T} = \{\tier{0}, \tier{1}, \ldots, \tier{7}\}$ be a set of tiers ordered by model capacity. We define a routing function $R: \mathcal{X} \to \mathcal{T}$ that maps each request to the \textit{smallest sufficient tier}, and a confidence function $\conf: \mathcal{Y} \to [0, 1]$ that determines whether escalation is needed.
+
+% ================================================================
+% 2. FORMAL FRAMEWORK
+% ================================================================
+\section{Formal Framework}
+
+\subsection{Tier Space}
+
+\begin{definition}[Tier]
+A \emph{tier} $\tau_i \in \mathcal{T}$ is a tuple $(\theta_i, v_i, h_i)$ where:
+\begin{itemize}[nosep]
+    \item $\theta_i \in \R^+$ is the parameter count (in billions)
+    \item $v_i \in \mathbb{N}$ is the VRAM requirement (in MB)
+    \item $h_i \in \{0, 1\}$ indicates whether the tier is always-resident
+\end{itemize}
+\end{definition}
+
+The tier ordering is $\tau_0 \prec \tau_1 \prec \cdots \prec \tau_7$, where $\prec$ denotes strictly increasing capability and cost. The always-resident set is:
+
+\begin{equation}
+    \mathcal{H} = \{\tau_i \in \mathcal{T} \mid h_i = 1\} = \{\tier{0}, \tier{1}, \tier{2}\}
+\end{equation}
+
+\begin{table}[H]
+\centering
+\caption{Tier specifications}
+\label{tab:tiers}
+\small
+\begin{tabular}{@{}llrrrc@{}}
+\toprule
+Tier & OS Analogy & $\theta$ (B) & $v$ (MB) & TTFT & Hot \\
+\midrule
+\tier{0} & \texttt{init} & 0.6 & 500 & 10ms & \checkmark \\
+\tier{1} & Syscall & 1.7 & 1200 & 20ms & \checkmark \\
+\tier{2} & Shell & 4 & 2800 & 40ms & \checkmark \\
+\tier{3} & Daemon & 8 & 5000 & 60ms & \\
+\tier{4} & Heavy daemon & 14 & 9000 & 100ms & \\
+\tier{5} & Workstation & 32 & 18000 & 200ms & \\
+\tier{6} & Full WS & 72 & 42000 & 400ms & \\
+\tier{7} & Network & $\infty$ & 0 & 500ms & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Feasibility}
+
+\begin{definition}[Feasible Tier]
+Given a system with available VRAM budget $V_{\text{avail}}$, tier $\tau_i$ is \emph{feasible} iff $v_i \leq V_{\text{avail}}$. The maximum feasible tier is:
+\begin{equation}
+    \tau_{\max} = \max\{\tau_i \in \mathcal{T} \mid v_i \leq V_{\text{avail}} \wedge \tau_i \neq \tier{7}\}
+\end{equation}
+\end{definition}
+
+The VRAM budget is computed as:
+\begin{equation}
+    V_{\text{avail}} = 
+    \begin{cases}
+        0.75 \cdot V_{\text{unified}} & \text{Apple Silicon} \\
+        0.80 \cdot V_{\text{discrete}} & \text{discrete GPU} \\
+        0.75 \cdot V_{\text{RAM}} & \text{CPU-only}
+    \end{cases}
+\end{equation}
+
+The concurrent loading constraint ensures always-hot tiers fit alongside the working tier:
+\begin{equation}
+    \sum_{\tau_i \in \mathcal{H}} v_i + v_k \leq V_{\text{avail}} \quad \text{for working tier } \tau_k
+\end{equation}
+
+% ================================================================
+% 3. ROUTING
+% ================================================================
+\section{Routing}
+
+\subsection{The Routing Function}
+
+\begin{definition}[Router]
+The routing function $R: \mathcal{X} \to \mathcal{T} \times [0,1]$ maps a request $x$ to a tier-confidence pair $(\tau, c)$:
+\begin{equation}
+    R(x) = \bigl(\tau^*(x),\; \conf_R(x)\bigr)
+\end{equation}
+where $\tau^*(x)$ is the selected tier and $\conf_R(x)$ is the routing confidence.
+\end{definition}
+
+\subsection{Complexity Estimation}
+
+The heuristic router estimates a complexity score $\kappa(x) \in [0, 1]$:
+
+\begin{equation}
+    \kappa(x) = \min\!\Bigl(1,\; \kappa_{\ell}(x) + \kappa_{p}(x) + \kappa_{s}(x) + \kappa_{t}(x)\Bigr)
+\end{equation}
+
+where:
+\begin{align}
+    \kappa_{\ell}(x) &= \begin{cases}
+        0.0 & |x| < 50 \\
+        0.1 & |x| < 200 \\
+        0.2 & |x| < 500 \\
+        0.3 & |x| < 2000 \\
+        0.4 & \text{otherwise}
+    \end{cases} \\[4pt]
+    \kappa_{p}(x) &= \sum_{p \in \mathcal{P}} w_p \cdot \mathbf{1}[p \text{ matches } x] \\[4pt]
+    \kappa_{s}(x) &= \min(0.2,\; 0.05 \cdot |\text{step indicators in } x|) \\[4pt]
+    \kappa_{t}(x) &= \min(0.15,\; 0.05 \cdot |\text{tool verbs in } x|)
+\end{align}
+
+The pattern weights $w_p$ are: code patterns $= 0.25$, planning $= 0.20$, analysis $= 0.15$, tool use $= 0.10$.
+
+\subsection{Tier Selection}
+
+Let $\gamma: [0,1] \to \mathcal{T}$ map complexity to tier and $\phi: \text{Category} \to \mathcal{T}$ map task category to minimum tier. The selected tier is:
+
+\begin{equation}
+    \tau^*(x) = \min\Bigl(\tau_{\max},\; \max\!\bigl(\gamma(\kappa(x)),\; \phi(\text{cat}(x))\bigr)\Bigr)
+\end{equation}
+
+Routing confidence decreases with the gap between ideal and actual tier:
+\begin{equation}
+    \conf_R(x) = \text{clip}\!\Bigl(1.0 - 0.15 \cdot \bigl|\tau^* - \max(\gamma(\kappa), \phi(\text{cat}))\bigr|,\; 0.3,\; 1.0\Bigr)
+\end{equation}
+
+\subsection{Model-Based Routing}
+
+When the L0 model $\model_0$ is loaded, routing uses the model itself:
+\begin{equation}
+    R_{\model}(x) = \model_0\!\left(\text{``classify: ''} \| x_{[:500]}\right) \to (\tau, \text{cat}, c)
+\end{equation}
+
+The L0 model outputs a structured JSON classification. If $\model_0$ fails, the system falls back to the heuristic $R_H$.
+
+% ================================================================
+% 4. CONFIDENCE VERIFICATION
+% ================================================================
+\section{Cross-Family Confidence}
+
+\subsection{Independence Argument}
+
+Let $\family = \{f_1, f_2, \ldots, f_n\}$ be the set of model families (Qwen, Llama, Gemma, Granite, Phi, OLMo). Models within the same family share training data, architecture, and optimization --- their failures are correlated. Models across families are approximately independent.
+
+\begin{proposition}[Cross-Family Confidence]
+Let $\model_a \in f_i$ and $\model_b \in f_j$ with $f_i \neq f_j$. Let $p_a = P(\model_a \text{ correct})$ and $p_b = P(\model_b \text{ correct})$. If $\model_a$ and $\model_b$ agree on answer $y$, the posterior probability of correctness is:
+\begin{equation}
+    P(y \text{ correct} \mid \model_a = \model_b = y) = \frac{p_a \, p_b}{p_a \, p_b + (1 - p_a)(1 - p_b) \cdot \epsilon}
+\end{equation}
+where $\epsilon$ is the probability of coincidental agreement on an incorrect answer. For independent models, $\epsilon \ll 1$, yielding $P \to 1$ as $\epsilon \to 0$.
+\end{proposition}
+
+Within the same family, $\epsilon$ is substantially higher due to correlated failure modes (shared training data, similar attention patterns). This is why cross-family agreement is a stronger signal.
+
+\subsection{Challenge Protocol}
+
+The challenge is triggered when $\conf_R(x) < \alpha$, where $\alpha = 0.75$:
+
+\begin{algorithm}[H]
+\caption{Cross-Family Challenge}
+\begin{algorithmic}[1]
+\Require messages $m$, core response $y_c$ from $\model_c \in f_{\text{core}}$, tier $\tau$
+\State $\model_d \gets$ \Call{SelectChallenger}{$\tau, f_{\text{core}}$} \Comment{different family}
+\State $y_d \gets \model_d(m)$
+\State $a \gets$ \Call{CompareAnswers}{$y_c, y_d$}
+\If{$a \in \{\text{strong\_agree}, \text{weak\_agree}\}$}
+    \State \Return $y_c$ with boosted confidence
+\Else
+    \State \Return \Call{Escalate}{Swarm}
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Answer Comparison}
+
+Two answers are compared using a composite similarity metric. Let $\sigma_J$ denote Jaccard similarity over word sets:
+
+\begin{equation}
+    \sigma_J(a, b) = \frac{|W(a) \cap W(b)|}{|W(a) \cup W(b)|}
+\end{equation}
+
+where $W(\cdot)$ extracts the normalized word set. The comparison uses a weighted combination of conclusion similarity and full-text similarity:
+
+\begin{equation}
+    \sigma(a, b) = 0.6 \cdot \sigma_J\!\bigl(C(a), C(b)\bigr) + 0.4 \cdot \sigma_J(a, b)
+\end{equation}
+
+where $C(\cdot)$ extracts the first substantive sentence. Agreement is classified by thresholds:
+
+\begin{table}[H]
+\centering
+\caption{Agreement classification}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+Agreement Level & $\sigma$ Range & Confidence \\
+\midrule
+Strong agree & $> 0.70$ & 0.85 \\
+Weak agree & $> 0.45$ & 0.65 \\
+Ambiguous & $> 0.25$ & 0.45 \\
+Disagree & $> 0.10$ & 0.25 \\
+Strong disagree & $\leq 0.10$ & 0.10 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ================================================================
+% 5. SWARM CONSENSUS
+% ================================================================
+\section{Swarm Consensus}
+
+\subsection{Fan-Out}
+
+When the challenger disagrees or initial confidence falls below $\beta = 0.50$, Cortex escalates to a swarm of $n$ models from $k$ families:
+
+\begin{equation}
+    \mathcal{S} = \{(\model_1, f_1), (\model_2, f_2), \ldots, (\model_n, f_n)\}
+\end{equation}
+
+For \textit{hard} problems: $n \in [3, 5]$, maximizing family diversity. For \textit{hardest} problems: all available models.
+
+\subsection{Weight Function}
+
+Each model receives a vote weight based on its parameter count:
+
+\begin{equation}
+    w(\theta) = 
+    \begin{cases}
+        1.0 & \theta \leq 1\text{B} \\
+        1.5 & \theta \leq 4\text{B} \\
+        2.0 & \theta \leq 8\text{B} \\
+        2.5 & \theta \leq 14\text{B} \\
+        3.0 & \theta \leq 32\text{B} \\
+        4.0 & \theta \leq 70\text{B} \\
+        5.0 & \text{otherwise}
+    \end{cases}
+\end{equation}
+
+\subsection{Clustering}
+
+Responses are grouped into agreement clusters $\{G_1, G_2, \ldots, G_m\}$ using greedy assignment. Response $y_j$ is assigned to the first cluster $G_i$ such that $\sigma(y_j, y_{G_i}^{\text{rep}}) > 0.45$ (weak agreement with the cluster representative). Otherwise, a new cluster is created.
+
+\subsection{Weighted Consensus}
+
+The winning cluster $G^*$ maximizes total weight:
+
+\begin{equation}
+    G^* = \arg\max_{G_i} \sum_{(\model_j, f_j) \in G_i} w(\theta_j)
+\end{equation}
+
+The consensus answer is selected from the highest-weighted model in $G^*$:
+\begin{equation}
+    y^* = y_{\arg\max_{j \in G^*} w(\theta_j)}
+\end{equation}
+
+\subsection{Swarm Confidence}
+
+Confidence is computed as:
+
+\begin{equation}
+    \conf_S = \text{clip}\!\left(\rho + \lambda_f - \lambda_s,\; 0,\; 1\right)
+\end{equation}
+
+where:
+\begin{align}
+    \rho &= \frac{\displaystyle\sum_{j \in G^*} w(\theta_j)}{\displaystyle\sum_{j=1}^{n} w(\theta_j)} && \text{(weighted agreement ratio)} \\[8pt]
+    \lambda_f &= \min\!\left(0.15,\; 0.05 \cdot |F(G^*)|\right) && \text{(family diversity bonus)} \\[4pt]
+    \lambda_s &= \max\!\left(0,\; 0.1 - 0.02 \cdot n\right) && \text{(small-swarm penalty)}
+\end{align}
+
+and $F(G^*)$ is the set of distinct families in the winning cluster.
+
+\begin{theorem}[Confidence Monotonicity]
+For fixed agreement ratio $\rho$, the swarm confidence $\conf_S$ is monotonically non-decreasing in both the number of agreeing families $|F(G^*)|$ and the total swarm size $n$. Additional independent agreement can only increase confidence.
+\end{theorem}
+
+\begin{proof}
+$\lambda_f$ is non-decreasing in $|F(G^*)|$ (bounded by 0.15). $\lambda_s$ is non-increasing in $n$ (and becomes 0 for $n \geq 5$). Since $\conf_S = \rho + \lambda_f - \lambda_s$, both terms move $\conf_S$ upward. \qed
+\end{proof}
+
+% ================================================================
+% 6. ESCALATION PIPELINE
+% ================================================================
+\section{Escalation Pipeline}
+
+The full pipeline is a sequential decision process with three confidence thresholds:
+
+\begin{align}
+    \alpha &= 0.75 && \text{(challenge threshold)} \\
+    \beta  &= 0.50 && \text{(swarm threshold)} \\
+    \delta &= 0.30 && \text{(large swarm threshold)}
+\end{align}
+
+\begin{algorithm}[H]
+\caption{Cortex Process}
+\begin{algorithmic}[1]
+\Require request $x$, messages $m$
+\State $(\tau, c) \gets R(x)$ \Comment{Route}
+\State $y \gets \model_\tau^{\text{core}}(m)$ \Comment{Core model}
+\If{$y = \text{null}$}
+    \State $(\tau, y) \gets$ \Call{Escalate}{$\tau + 1 \ldots \tau_{\max}$}
+\EndIf
+\If{$c < \alpha$} \Comment{Challenge}
+    \State $(a, c') \gets$ \Call{Challenge}{$m, y, \tau$}
+    \If{$a \notin \{\text{agree}\}$}
+        \If{$c' < \delta$} \Comment{Large swarm}
+            \State $y, c'' \gets$ \Call{Swarm}{$m, \tau, \text{LARGE}$}
+        \Else \Comment{Small swarm}
+            \State $y, c'' \gets$ \Call{Swarm}{$m, \tau, \text{SMALL}$}
+        \EndIf
+    \EndIf
+\EndIf
+\State \Return $y$
+\end{algorithmic}
+\end{algorithm}
+
+The expected cost is substantially lower than always using $\model_{\max}$. For a request distribution where fraction $p_e$ of requests are ``easy'' (handled at $\tier{0}$--$\tier{2}$), $p_m$ are ``medium,'' and $p_h$ are ``hard'':
+
+\begin{equation}
+    \mathbb{E}[\text{cost}] = p_e \cdot c(\tau_{\text{low}}) + p_m \cdot 2c(\tau_{\text{mid}}) + p_h \cdot n \cdot c(\tau_{\text{mid}})
+\end{equation}
+
+Since empirically $p_e \gg p_h$, the expected cost is dominated by cheap, low-tier inference.
+
+% ================================================================
+% 7. SYSTEM LAYER
+% ================================================================
+\section{System Layer}
+
+\subsection{Hardware Detection}
+
+On boot, Cortex constructs a system profile $\mathcal{P}$:
+
+\begin{equation}
+    \mathcal{P} = (\text{CPU}, \text{GPU}, \text{RAM}, \text{Backends}, \text{OS})
+\end{equation}
+
+Detection covers NVIDIA (via \texttt{nvidia-smi}), AMD (via \texttt{rocm-smi}), Apple Silicon (via \texttt{sysctl}), and CPU features (AVX2, AVX-512, NEON, AMX). The feasible tier set $\mathcal{T}_\mathcal{P} \subseteq \mathcal{T}$ is computed at boot time and cached.
+
+\subsection{Model Manager}
+
+The Model Manager implements the \texttt{systemd} analogy:
+
+\begin{itemize}[nosep, leftmargin=*]
+    \item \textbf{Boot}: loads $\mathcal{H} = \{\tier{0}, \tier{1}, \tier{2}\}$
+    \item \textbf{Load}: instantiates on-demand tiers when first requested
+    \item \textbf{Evict}: LRU eviction under VRAM pressure
+    \item \textbf{Health}: periodic liveness checks, automatic restart
+\end{itemize}
+
+The VRAM scheduler solves a bin-packing problem: maximize the number of concurrently loaded tiers subject to $\sum v_i \leq V_{\text{avail}}$, with always-hot tiers having priority.
+
+\subsection{Persistent Memory}
+
+All state persists in SQLite (\texttt{\textasciitilde/.cortex/cortex.db}) with WAL mode:
+
+\begin{itemize}[nosep, leftmargin=*]
+    \item \textbf{Threads}: conversation state and message history
+    \item \textbf{Audit log}: every routing decision, tier, model, confidence, TTFT, and escalation path (append-only)
+    \item \textbf{KV cache index}: prefix hashes for cache reuse across requests
+    \item \textbf{Policies}: hierarchical config (\texttt{thread > app > global})
+    \item \textbf{Usage stats}: daily aggregates by tier and model
+\end{itemize}
+
+\subsection{API Compatibility}
+
+The daemon accepts three formats and normalizes to a common internal representation:
+
+\begin{equation*}
+    \text{Request}_{\text{any}} \xrightarrow{\text{normalize}} \text{ChatCompletions} \xrightarrow{\text{Cortex}} \text{Response} \xrightarrow{\text{format}} \text{Response}_{\text{any}}
+\end{equation*}
+
+\begin{table}[H]
+\centering
+\caption{API format support}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Format & Status \\
+\midrule
+OpenAI Chat Completions & Native \\
+OpenAI Responses API & Translated \\
+Anthropic Messages API & Translated \\
+Tool calling & Pass-through \\
+Multimodal & Text-extracted \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ================================================================
+% 8. PERFORMANCE
+% ================================================================
+\section{Performance}
+
+\subsection{TTFT Model}
+
+Time-to-first-token for a request routed to tier $\tau_i$ with resident status $h_i$:
+
+\begin{equation}
+    \text{TTFT}(\tau_i) = 
+    \begin{cases}
+        t_{\text{infer}}(\tau_i) & h_i = 1 \text{ (always-hot)} \\
+        t_{\text{load}}(\tau_i) + t_{\text{infer}}(\tau_i) & h_i = 0 \text{ (cold)} \\
+        t_{\text{infer}}(\tau_i) & h_i = 0 \text{ (warm, cached)}
+    \end{cases}
+\end{equation}
+
+Since $\mathcal{H}$ handles the majority of requests (routing, classification, tool calls, drafts), the expected TTFT across all requests is:
+
+\begin{equation}
+    \mathbb{E}[\text{TTFT}] = \sum_{i} P(\tau_i) \cdot \text{TTFT}(\tau_i) \approx P(\mathcal{H}) \cdot \bar{t}_{\mathcal{H}}
+\end{equation}
+
+where $\bar{t}_{\mathcal{H}} \leq 40$ms.
+
+\subsection{Platform Performance}
+
+\begin{table}[H]
+\centering
+\caption{Expected TTFT by platform (L2 tier)}
+\small
+\begin{tabular}{@{}llr@{}}
+\toprule
+Platform & Backend & TTFT \\
+\midrule
+Linux + H100 & vLLM (AWQ) & 20--50ms \\
+Linux + RTX 4090 & llama.cpp & 30--80ms \\
+macOS + M4 Ultra & llama.cpp (Metal) & 50--150ms \\
+Linux + RX 7900 & llama.cpp (ROCm) & 40--100ms \\
+CPU-only & llama.cpp (AVX2) & 200--2000ms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Graceful Degradation}
+
+Let $V$ be the available VRAM. Cortex's capability degrades smoothly:
+
+\begin{equation}
+    \text{capability}(V) = 
+    \begin{cases}
+        \text{Full stack (L0--L6)} & V \geq 42\text{GB} \\
+        \text{Strong local (L0--L5)} & V \geq 18\text{GB} \\
+        \text{Standard (L0--L4)} & V \geq 9\text{GB} \\
+        \text{Compact (L0--L3)} & V \geq 5\text{GB} \\
+        \text{Minimal (L0--L2)} & V \geq 2.8\text{GB} \\
+        \text{Reflex only (L0)} & V \geq 0.5\text{GB}
+    \end{cases}
+\end{equation}
+
+At every level, L7 (remote frontier) remains available as a network fallback. The system always functions --- analogous to booting from a minimal \texttt{initramfs}.
+
+% ================================================================
+% 9. GGUF-FIRST FORMAT STRATEGY
+% ================================================================
+\section{GGUF-First Format Strategy}
+
+Cortex standardizes on GGUF as the universal model file format. A single quantized file $\model_{\text{gguf}}$ executes identically across:
+
+\begin{equation}
+    \model_{\text{gguf}} \to \{\text{CUDA},\; \text{Metal},\; \text{ROCm},\; \text{CPU}\}
+\end{equation}
+
+This is a deliberate architectural choice. Let $n_p$ be the number of platforms and $n_f$ the number of format variants. Without GGUF, the model catalog grows as $O(n_p \cdot n_f)$. With GGUF:
+
+\begin{equation}
+    |\text{catalog}| = |\mathcal{T}| \cdot (1 + |\family_{\text{challenge}}|)
+\end{equation}
+
+For NVIDIA users running vLLM, AWQ-quantized variants are optionally available for improved prefix caching, but GGUF remains the universal fallback.
+
+% ================================================================
+% 10. DESIGN PRINCIPLES
+% ================================================================
+\section{Design Principles}
+
+\begin{enumerate}[nosep, leftmargin=*]
+    \item \textbf{Start small.} $\tau^*(x) = \min\{\tau \in \mathcal{T} \mid \tau \text{ sufficient for } x\}$.
+    \item \textbf{Measure confidence.} Cross-family verification provides an empirical signal that single-model inference lacks.
+    \item \textbf{One format everywhere.} GGUF eliminates platform-specific model management.
+    \item \textbf{Always available.} $\mathcal{H}$ is loaded at boot and never evicted.
+    \item \textbf{Degrade gracefully.} If hardware supports only $\mathcal{H}$, the system still functions. L7 is the network fallback.
+    \item \textbf{Audit everything.} Every routing decision, escalation, and latency is logged for continuous improvement.
+\end{enumerate}
+
+% ================================================================
+% 11. FUTURE WORK
+% ================================================================
+\section{Future Work}
+
+\begin{itemize}[nosep, leftmargin=*]
+    \item \textbf{LLM-as-judge aggregation}: replace Jaccard-based $\sigma$ with a small judge model for nuanced agreement detection
+    \item \textbf{Persistent credibility}: track per-model accuracy over time and adjust $w(\theta)$ dynamically
+    \item \textbf{Adaptive routing}: fine-tune $\model_0$ on audit log data to improve classification accuracy
+    \item \textbf{Multi-GPU scheduling}: VRAM-aware placement across multiple devices
+    \item \textbf{Speculative decoding}: use $\tier{0}$ as a draft model for higher tiers
+    \item \textbf{Embedding memory}: vector search over conversation history for long-term recall
+\end{itemize}
+
+% ================================================================
+% 12. CONCLUSION
+% ================================================================
+\section{Conclusion}
+
+Cortex reframes LLM inference as an operating system problem. The L0 router acts as PID~1, the cross-family challenge provides empirical confidence measurement, and the swarm offers weighted consensus for the hardest problems. By routing to the smallest capable model, the system is faster (lower TTFT), more reliable (measured confidence via independent verification), and universally deployable (GGUF-first).
+
+The question is not whether AI should be integrated into the operating system. It is whether the operating system should be redesigned around AI. Cortex is an argument that it should.
+
+\vspace{1em}
+\noindent\rule{\columnwidth}{0.4pt}
+\small
+\noindent Cortex is open source under the MIT License. \\
+\url{https://github.com/elevate-foundry}
+
+\end{document}
