@@ -60,6 +60,7 @@ from .api_adapter import (
     format_response,
     detect_api_format,
 )
+from .cortex import Cortex, CortexConfig, CortexResponse
 
 logger = logging.getLogger("cortex")
 
@@ -165,16 +166,28 @@ class ProcessManager:
             return backend
 
         if backend.status == BackendStatus.STARTING:
-            # Wait for it to become ready
-            for _ in range(100):  # 10 seconds max
-                await asyncio.sleep(0.1)
-                if backend.status == BackendStatus.READY:
-                    backend.last_request = time.monotonic()
-                    backend.request_count += 1
-                    return backend
+            # Don't block — the model is still being pulled
             return None
 
-        # Need to start it
+        # Check if model is already available locally (fast check)
+        if await self._is_model_local(backend):
+            backend.port = 11434
+            backend.status = BackendStatus.READY
+            backend.last_request = time.monotonic()
+            backend.request_count += 1
+            logger.info("%s backend ready (model already local)", tier.name)
+            return backend
+
+        # Model not local — start background pull, don't block
+        if not backend.always_hot:
+            logger.info(
+                "%s model not local, starting background pull (will fall back)",
+                tier.name,
+            )
+            asyncio.create_task(self._start_backend(backend))
+            return None
+
+        # Hot tier — must wait for pull
         await self._start_backend(backend)
         if backend.status == BackendStatus.READY:
             backend.last_request = time.monotonic()
@@ -182,6 +195,21 @@ class ProcessManager:
             return backend
 
         return None
+
+    async def _is_model_local(self, backend: ManagedBackend) -> bool:
+        """Check if the model is already pulled in ollama."""
+        model_id = backend.model.ollama_tag or backend.model.model_id
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ollama", "list",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            # ollama list output: "NAME  ID  SIZE  MODIFIED"
+            return model_id in stdout.decode()
+        except Exception:
+            return False
 
     async def _start_backend(self, backend: ManagedBackend):
         """Start a llama-server process for a backend."""
@@ -343,11 +371,17 @@ async def handle_chat_completions(
     backend = await process_mgr.ensure_backend(target_tier)
 
     if backend is None:
-        # Fall back to highest available tier
+        # Fall back to highest READY tier (don't trigger new pulls)
         for tier in sorted(process_mgr.backends.keys(), reverse=True):
-            backend = await process_mgr.ensure_backend(tier)
-            if backend:
-                logger.info("Fell back to %s", tier.name)
+            b = process_mgr.backends.get(tier)
+            if b and b.status == BackendStatus.READY:
+                backend = b
+                backend.last_request = time.monotonic()
+                backend.request_count += 1
+                logger.info(
+                    "Fell back from %s → %s (model not yet available)",
+                    target_tier.name, tier.name,
+                )
                 break
 
     if backend is None:
@@ -366,6 +400,19 @@ async def handle_chat_completions(
         forward_body = {**request_body, "model": model_name}
     else:
         forward_body = {**request_body}
+
+    # For simple/reflex tiers (L0-L2), disable Qwen3 thinking mode to save tokens
+    # and reduce latency — these are fast lookups, not reasoning tasks.
+    if target_tier.value <= Tier.L2.value:
+        msgs = list(forward_body.get("messages", []))
+        # Prepend /no_think system prompt to suppress reasoning
+        if not any(m.get("role") == "system" for m in msgs):
+            msgs.insert(0, {"role": "system", "content": "/no_think"})
+            forward_body["messages"] = msgs
+
+    # Tell Ollama to keep hot models in VRAM (don't evict)
+    if backend.always_hot and "keep_alive" not in forward_body:
+        forward_body["keep_alive"] = "24h"
 
     target_url = f"{backend.url}/v1/chat/completions"
 
@@ -430,12 +477,18 @@ class DaemonServer:
         self.port = port
         self.profile = profile or detect_system()
         self.process_mgr = ProcessManager(self.profile)
+        self.cortex = Cortex(profile=self.profile)
         self.start_time = 0.0
         self.request_count = 0
 
     async def start(self):
         """Start the daemon."""
         self.start_time = time.monotonic()
+
+        # Boot the Cortex orchestrator (loads L0-L2 models)
+        logger.info("Booting Cortex orchestrator...")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self.cortex.boot)
 
         # Start hot tier backends
         logger.info("Starting hot tier backends...")
@@ -591,63 +644,130 @@ class DaemonServer:
 
         stream = normalized.stream
 
-        # Route using the normalized messages
-        status, result = await handle_chat_completions(
-            {
-                "messages": normalized.messages,
-                "model": normalized.model,
-                "max_tokens": normalized.max_tokens,
-                "temperature": normalized.temperature,
-                "stream": stream,
-                "tools": normalized.tools,
-                "tool_choice": normalized.tool_choice,
-            },
-            self.process_mgr,
-            self.profile,
-        )
-
-        if stream and isinstance(result, list):
-            # Stream SSE response
-            header = (
-                f"HTTP/1.1 {status} OK\r\n"
-                f"Content-Type: text/event-stream\r\n"
-                f"Cache-Control: no-cache\r\n"
-                f"Connection: close\r\n"
-                f"\r\n"
+        if stream:
+            # Streaming: use the old forwarding path (Cortex.process is sync)
+            status, result = await handle_chat_completions(
+                {
+                    "messages": normalized.messages,
+                    "model": normalized.model,
+                    "max_tokens": normalized.max_tokens,
+                    "temperature": normalized.temperature,
+                    "stream": True,
+                    "tools": normalized.tools,
+                    "tool_choice": normalized.tool_choice,
+                },
+                self.process_mgr,
+                self.profile,
             )
-            writer.write(header.encode())
-            for chunk in result:
-                writer.write(chunk)
-            await writer.drain()
-        else:
-            # Extract content from the Chat Completions result and reformat
-            if isinstance(result, dict) and "choices" in result:
-                content = result["choices"][0].get("message", {}).get("content", "")
-                routing_meta = result.get("_routing")
-                model_used = result.get("model", "")
-                formatted = format_response(
-                    content, normalized, routing_meta, model_used,
+            if isinstance(result, list):
+                header = (
+                    f"HTTP/1.1 {status} OK\r\n"
+                    f"Content-Type: text/event-stream\r\n"
+                    f"Cache-Control: no-cache\r\n"
+                    f"Connection: close\r\n"
+                    f"\r\n"
                 )
-                await self._send_json(writer, status, formatted)
+                writer.write(header.encode())
+                for chunk in result:
+                    writer.write(chunk)
+                await writer.drain()
             else:
-                # Error or non-standard response — pass through
                 await self._send_json(writer, status, result)
+        else:
+            # Non-streaming: route through Cortex orchestrator
+            # (includes routing → generation → challenge → swarm)
+            try:
+                loop = asyncio.get_event_loop()
+                cortex_resp: CortexResponse = await loop.run_in_executor(
+                    None,
+                    lambda: self.cortex.process(
+                        normalized.messages,
+                        max_tokens=normalized.max_tokens,
+                    ),
+                )
+
+                routing_meta = {
+                    "tier": cortex_resp.tier_used.name,
+                    "category": cortex_resp.route_decision.category.value,
+                    "confidence": cortex_resp.confidence,
+                    "backend_model": cortex_resp.model_used,
+                    "escalation_path": cortex_resp.escalation_path,
+                    "total_ms": round(cortex_resp.total_ms, 1),
+                }
+
+                formatted = format_response(
+                    cortex_resp.content,
+                    normalized,
+                    routing_meta,
+                    cortex_resp.model_used,
+                    cortex_resp.total_ms,
+                )
+                await self._send_json(writer, 200, formatted)
+
+            except Exception as e:
+                logger.error("Cortex processing error: %s", e, exc_info=True)
+                # Fall back to direct forwarding
+                status, result = await handle_chat_completions(
+                    {
+                        "messages": normalized.messages,
+                        "model": normalized.model,
+                        "max_tokens": normalized.max_tokens,
+                        "temperature": normalized.temperature,
+                        "stream": False,
+                    },
+                    self.process_mgr,
+                    self.profile,
+                )
+                if isinstance(result, dict) and "choices" in result:
+                    content = result["choices"][0].get("message", {}).get("content", "")
+                    formatted = format_response(
+                        content, normalized, result.get("_routing"), result.get("model", ""),
+                    )
+                    await self._send_json(writer, status, formatted)
+                else:
+                    await self._send_json(writer, status, result)
 
     async def _handle_models(self, writer):
-        """Handle GET /v1/models — list available tiers as models."""
+        """Handle GET /v1/models — list ALL available models (catalog + discovered)."""
         models = []
+        seen_ids = set()
+
+        # Add managed backend models with status
         for b in self.process_mgr.status_report():
-            models.append({
-                "id": b["ollama_tag"] or b["model"],
-                "object": "model",
-                "created": int(self.start_time),
-                "owned_by": f"local-{b['tier']}",
-                "meta": {
-                    "tier": b["tier"],
-                    "status": b["status"],
-                    "always_hot": b["always_hot"],
-                },
-            })
+            model_id = b["ollama_tag"] or b["model"]
+            if model_id not in seen_ids:
+                models.append({
+                    "id": model_id,
+                    "object": "model",
+                    "created": int(self.start_time),
+                    "owned_by": f"local-{b['tier']}",
+                    "meta": {
+                        "tier": b["tier"],
+                        "status": b["status"],
+                        "always_hot": b["always_hot"],
+                    },
+                })
+                seen_ids.add(model_id)
+
+        # Add all discovered Ollama models not already listed
+        for tier in Tier:
+            tier_models = get_models_for_tier(tier, self.profile)
+            for m in tier_models:
+                model_id = m.ollama_tag or m.model_id
+                if model_id not in seen_ids:
+                    models.append({
+                        "id": model_id,
+                        "object": "model",
+                        "created": int(self.start_time),
+                        "owned_by": f"local-{tier.name}",
+                        "meta": {
+                            "tier": tier.name,
+                            "family": m.family,
+                            "vram_mb": m.vram_mb,
+                            "format": m.format,
+                        },
+                    })
+                    seen_ids.add(model_id)
 
         await self._send_json(writer, 200, {
             "object": "list",
@@ -670,7 +790,7 @@ class DaemonServer:
         })
 
     async def _handle_status(self, writer):
-        """Handle GET /status — detailed backend status."""
+        """Handle GET /status — detailed backend + Cortex status."""
         uptime = time.monotonic() - self.start_time
         await self._send_json(writer, 200, {
             "daemon": {
@@ -688,6 +808,7 @@ class DaemonServer:
                 "accelerator": self.profile.primary_accelerator.value,
             },
             "backends": self.process_mgr.status_report(),
+            "cortex": self.cortex.status(),
             "max_local_tier": max_feasible_tier(self.profile).name,
         })
 

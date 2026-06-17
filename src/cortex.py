@@ -123,6 +123,10 @@ class Cortex:
         t0 = time.monotonic()
         escalation_path: list[str] = []
 
+        # Thinking models (Qwen3) use tokens for reasoning before content.
+        # Ensure a minimum budget so the model can produce visible output.
+        gen_tokens = max(max_tokens, 256)
+
         # Extract the user prompt for routing
         prompt = ""
         for msg in reversed(messages):
@@ -136,7 +140,7 @@ class Cortex:
         escalation_path.append(f"route→{tier.name}(conf={route.confidence:.2f})")
 
         # --- Step 2: Generate with core model ---
-        core_response = self._generate(messages, tier, max_tokens)
+        core_response = self._generate(messages, tier, gen_tokens)
         if core_response is None:
             # Escalate if core model failed
             tier, core_response = self._escalate_generate(messages, tier, max_tokens)

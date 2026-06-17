@@ -177,12 +177,24 @@ class BackendAdapter:
 
         # Parse response — Ollama vs OpenAI format
         if self.backend == BackendType.OLLAMA:
-            content = body.get("message", {}).get("content", "")
+            msg = body.get("message", {})
+            content = msg.get("content", "")
+            # Qwen3 thinking models: content may be empty while thinking is populated
+            if not content.strip():
+                thinking = msg.get("thinking", "") or msg.get("reasoning", "")
+                if thinking:
+                    content = thinking
             resp_model = body.get("model", model)
-            finish = "stop"
+            finish = body.get("done_reason", "stop")
         else:
             choice = body.get("choices", [{}])[0]
-            content = choice.get("message", {}).get("content", "")
+            msg = choice.get("message", {})
+            content = msg.get("content", "")
+            # OpenAI-compat endpoint may have reasoning field for thinking models
+            if not content.strip():
+                reasoning = msg.get("reasoning", "") or msg.get("thinking", "")
+                if reasoning:
+                    content = reasoning
             resp_model = body.get("model", model)
             finish = choice.get("finish_reason", "")
 
