@@ -35,9 +35,6 @@ import os
 import signal
 import sys
 import time
-import uuid
-from dataclasses import dataclass, field
-from enum import Enum
 from typing import Optional
 
 from .hardware_detect import detect_system, SystemProfile
@@ -313,37 +310,66 @@ class DaemonServer:
         error_msg = ""
 
         if stream:
-            # Streaming: use the old forwarding path (Cortex.process is sync)
-            status_code, result = await handle_chat_completions(
-                {
+            # Streaming: resolve backend via Cortex, then stream via aiohttp
+            try:
+                import aiohttp
+
+                loop = asyncio.get_event_loop()
+                route, tier, adapter, model_tag = await loop.run_in_executor(
+                    None,
+                    lambda: self.cortex.resolve_backend(normalized.messages),
+                )
+                routed_tier = tier.name
+                actual_model = model_tag
+                category = route.category.value
+                confidence = route.confidence
+
+                if adapter is None:
+                    await self._send_json(writer, 503, {
+                        "error": {"message": "No backend available", "type": "server_error"}
+                    })
+                    return
+
+                # Build streaming request to the Ollama backend
+                forward_body = {
+                    "model": model_tag,
                     "messages": normalized.messages,
-                    "model": normalized.model,
-                    "max_tokens": normalized.max_tokens,
+                    "max_tokens": max(normalized.max_tokens, 256),
                     "temperature": normalized.temperature,
                     "stream": True,
-                    "tools": normalized.tools,
-                    "tool_choice": normalized.tool_choice,
-                },
-                self.process_mgr,
-                self.profile,
-            )
-            if isinstance(result, list):
-                header = (
-                    f"HTTP/1.1 {status_code} OK\r\n"
-                    f"Content-Type: text/event-stream\r\n"
-                    f"Cache-Control: no-cache\r\n"
-                    f"Connection: close\r\n"
-                    f"\r\n"
-                )
-                writer.write(header.encode())
-                for chunk in result:
-                    writer.write(chunk)
-                await writer.drain()
-                routed_tier = "stream"
-            else:
-                await self._send_json(writer, status_code, result)
+                }
+                if normalized.tools:
+                    forward_body["tools"] = normalized.tools
+                if TIER_SPECS[tier].always_hot:
+                    forward_body["keep_alive"] = "24h"
+
+                target_url = f"{adapter.base_url}/v1/chat/completions"
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        target_url, json=forward_body,
+                        timeout=aiohttp.ClientTimeout(total=120),
+                    ) as resp:
+                        header = (
+                            f"HTTP/1.1 {resp.status} OK\r\n"
+                            f"Content-Type: text/event-stream\r\n"
+                            f"Cache-Control: no-cache\r\n"
+                            f"Connection: close\r\n"
+                            f"\r\n"
+                        )
+                        writer.write(header.encode())
+                        async for chunk in resp.content:
+                            writer.write(chunk)
+                        await writer.drain()
+
+            except Exception as e:
+                logger.error("Streaming error: %s", e, exc_info=True)
+                error_msg = str(e)
+                await self._send_json(writer, 502, {
+                    "error": {"message": f"Streaming error: {e}", "type": "server_error"}
+                })
         else:
-            # Non-streaming: route through Cortex orchestrator
+            # Non-streaming: full Cortex pipeline (route → generate → challenge → swarm)
             try:
                 loop = asyncio.get_event_loop()
                 cortex_resp: CortexResponse = await loop.run_in_executor(
@@ -383,34 +409,10 @@ class DaemonServer:
             except Exception as e:
                 logger.error("Cortex processing error: %s", e, exc_info=True)
                 error_msg = str(e)
-                # Fall back to direct forwarding
-                status_code, result = await handle_chat_completions(
-                    {
-                        "messages": normalized.messages,
-                        "model": normalized.model,
-                        "max_tokens": normalized.max_tokens,
-                        "temperature": normalized.temperature,
-                        "stream": False,
-                    },
-                    self.process_mgr,
-                    self.profile,
-                )
-                if isinstance(result, dict):
-                    routing = result.get("_routing", {})
-                    routed_tier = routing.get("tier", "")
-                    actual_model = routing.get("backend_model", "")
-                    category = routing.get("category", "")
-                    confidence = routing.get("confidence", 0)
-                    if "choices" in result:
-                        response_content = result["choices"][0].get("message", {}).get("content", "")
-                        formatted = format_response(
-                            response_content, normalized, routing, result.get("model", ""),
-                        )
-                        await self._send_json(writer, status_code, formatted)
-                    else:
-                        await self._send_json(writer, status_code, result)
-                else:
-                    await self._send_json(writer, status_code, result)
+                status_code = 502
+                await self._send_json(writer, 502, {
+                    "error": {"message": f"Processing error: {e}", "type": "server_error"}
+                })
 
         # --- Memory: persist response + audit ---
         latency_ms = (time.monotonic() - t0) * 1000
@@ -441,23 +443,25 @@ class DaemonServer:
         )
 
     async def _handle_models(self, writer):
-        """Handle GET /v1/models — list ALL available models (catalog + discovered)."""
+        """Handle GET /v1/models — list ALL available models (loaded + discovered)."""
         models = []
         seen_ids = set()
 
-        # Add managed backend models with status
-        for b in self.process_mgr.status_report():
-            model_id = b["ollama_tag"] or b["model"]
+        # Add models loaded in Cortex's ModelManager
+        mgr_status = self.cortex.manager.status()
+        for m in mgr_status.get("models", []):
+            model_id = m["model_id"]
             if model_id not in seen_ids:
                 models.append({
                     "id": model_id,
                     "object": "model",
                     "created": int(self.start_time),
-                    "owned_by": f"local-{b['tier']}",
+                    "owned_by": f"local-{m['tier']}",
                     "meta": {
-                        "tier": b["tier"],
-                        "status": b["status"],
-                        "always_hot": b["always_hot"],
+                        "tier": m["tier"],
+                        "state": m["state"],
+                        "family": m.get("family", ""),
+                        "vram_mb": m.get("vram_mb", 0),
                     },
                 })
                 seen_ids.add(model_id)
@@ -490,20 +494,21 @@ class DaemonServer:
     async def _handle_health(self, writer):
         """Handle GET /health."""
         uptime = time.monotonic() - self.start_time
+        mgr_status = self.cortex.manager.status()
         ready_count = sum(
-            1 for b in self.process_mgr.backends.values()
-            if b.status == BackendStatus.READY
+            1 for m in mgr_status.get("models", [])
+            if m["state"] == "ready"
         )
         await self._send_json(writer, 200, {
             "status": "ok",
             "uptime_seconds": round(uptime, 1),
             "total_requests": self.request_count,
-            "backends_ready": ready_count,
-            "backends_total": len(self.process_mgr.backends),
+            "models_ready": ready_count,
+            "models_loaded": mgr_status.get("models_loaded", 0),
         })
 
     async def _handle_status(self, writer):
-        """Handle GET /status — detailed backend + Cortex status."""
+        """Handle GET /status — detailed Cortex + system status."""
         uptime = time.monotonic() - self.start_time
         await self._send_json(writer, 200, {
             "daemon": {
@@ -520,7 +525,6 @@ class DaemonServer:
                 "gpu": self.profile.gpus[0].name if self.profile.gpus else "none",
                 "accelerator": self.profile.primary_accelerator.value,
             },
-            "backends": self.process_mgr.status_report(),
             "cortex": self.cortex.status(),
             "max_local_tier": max_feasible_tier(self.profile).name,
         })
@@ -719,7 +723,6 @@ def run_daemon(
     def _shutdown(sig, frame):
         sig_name = signal.Signals(sig).name if isinstance(sig, int) else sig.name
         logger.info("Received %s, shutting down...", sig_name)
-        loop.run_until_complete(daemon.process_mgr.shutdown())
         daemon.memory.close()
         loop.stop()
         sys.exit(0)
@@ -731,4 +734,4 @@ def run_daemon(
         loop.run_until_complete(daemon.start())
     except KeyboardInterrupt:
         logger.info("Shutting down...")
-        loop.run_until_complete(daemon.process_mgr.shutdown())
+        daemon.memory.close()
