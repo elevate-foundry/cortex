@@ -9,12 +9,14 @@
 ## System State
 
 ```scl
-@cortex → status [modules: 20, size_kb: 280, runtime: working]
+@cortex → status [modules: 28, size_kb: 380, runtime: working]
 @cortex → has [hardware_detect, tiers, router, backend_adapter, backend_selector,
                model_manager, challenger, swarm, cortex, daemon, api_adapter,
-               memory, policy, tools, resilience, main]
-@cortex → missing [tests, scl_parser, braille_codec, cli_polish, docs]
-@cortex → needs [verification, semantic_control, compact_encoding]
+               memory, policy, tools, resilience, main,
+               scl_types, scl_parser, scl_emitter, scl_grammar, scl_bridge, scl_delta,
+               braille_codec, braille_fingerprint, braille_manifest]
+@cortex → mutate [missing: [cli_polish, docs, tokenizer_bench, audit_scl_format]]
+@cortex → mutate [needs: [audit_integration, daemon_braille_status, delta_gossip_protocol]]
 ```
 
 ---
@@ -40,6 +42,12 @@ document   := record ('\n' record)*
 - Records compose into documents (one per line)
 - Documents compose into manifests (multi-document)
 - Manifests encode into Braille fingerprints (fixed-width hash)
+
+**Deltas:**
+- `@agent → mutate [key: new_value]` — only changed keys, receivers assume previous state persists
+- `@agent → snapshot [key: value, ...]` — full state, for bootstrapping new agents
+- `@agent → rollback [to: t, reason: ...]` — time-travel to previous version
+- Reconstruction: $S_t = S_0 \oplus \sum_{i=1}^{t} \Delta S_i$
 
 ---
 
@@ -71,8 +79,9 @@ document   := record ('\n' record)*
 
 @agent_2 → own [src/scl/__init__.py, src/scl/types.py, src/scl/parser.py,
                  src/scl/emitter.py, src/scl/cortex_bridge.py, src/scl/grammar.py,
+                 src/scl/delta.py,
                  tests/test_scl_parser.py, tests/test_scl_emitter.py,
-                 tests/test_scl_bridge.py]
+                 tests/test_scl_bridge.py, tests/test_scl_delta.py]
 
 @agent_3 → own [src/braille/__init__.py, src/braille/codec.py,
                  src/braille/fingerprint.py, src/braille/manifest.py,
@@ -126,6 +135,22 @@ Canonical form: `@router → select [model: qwen3:4b, confidence: 0.82]`
 @fingerprint_document → define [input: SCLDocument, output: str, width: 8]
 @similarity → define [input: (fp1, fp2), output: float, method: hamming]
 @routing_signature → define [format: tier|category|confidence|flags, width: 4]
+```
+
+### Contract 4: Semantic State Deltas (Agent 2 publishes → All consume)
+
+```scl
+@vector_clock → define [type: dict[str,int], ops: tick, merge, concurrent]
+@delta → define [agent_id: str, set_keys: dict, delete_keys: set,
+                  timestamp_ms: int, seq: int, weight: float, parent_hash: str]
+@delta → serialize [to_scl: @agent → mutate [...], from_scl: parse_mutate_record]
+@semantic_state → define [entries: dict[str,str], clock: VectorClock, version: int]
+@diff → define [input: (old_state, new_state), output: Delta]
+@apply_delta → define [input: (state, delta), output: new_state]
+@merge_deltas → define [input: (delta_a, delta_b, strategy), output: (merged, conflicts)]
+  @strategy → enum [lww: last_writer_wins, priority: weight_wins, union: crdt_gset, reject: error]
+@delta_stream → define [ops: append, current_state, state_at, rollback, checkpoint, compact,
+                         to_scl_document]
 ```
 
 ---
@@ -211,6 +236,20 @@ Canonical form: `@router → select [model: qwen3:4b, confidence: 0.82]`
 @agent_2 → deliver [modules: 5, test_files: 3, test_cases: 100+]
 ```
 
+### Phase 4: Semantic State Deltas ✓
+
+```scl
+@delta → implement [VectorClock, Delta, SemanticState, diff, apply_delta,
+                     merge_deltas, DeltaStream]
+@delta → mutate [status: complete, tests: 43_passing, file: src/scl/delta.py]
+@merge_strategies → implement [lww: timestamp_wins, priority: weight_wins,
+                                union: crdt_gset, reject: raise_error]
+@delta_stream → implement [append, state_at, rollback, checkpoint, compact,
+                            to_scl_document]
+@tests → write [test_scl_delta: vector_clock+diff+apply+merge+stream+fingerprint+scale,
+                 test_cases: 43]
+```
+
 ---
 
 ## Agent 3: BRAILLE
@@ -254,18 +293,22 @@ Canonical form: `@router → select [model: qwen3:4b, confidence: 0.82]`
 ## Coordination Protocol
 
 ```scl
-@sync → require [frequency: daily, format: one_line_status, target: STATUS.md]
+@sync → mutate [format: delta_scl, frequency: per_commit, target: delta_stream]
+@sync → note [agents_emit_deltas_not_full_state, receivers_apply_in_order]
 @merge_order → define [
-  1: agent_2.src/scl/types.py,
-  2: agent_1.tests/,
-  3: agent_2.src/scl/*,
-  4: agent_3.src/braille/*,
-  5: integration_pr
+  1: agent_2.src/scl/types.py,           ✓ complete
+  2: agent_1.tests/,                      ✓ complete
+  3: agent_2.src/scl/*,                   ✓ complete (parser, emitter, grammar, bridge, delta)
+  4: agent_3.src/braille/*,               ✓ complete (codec, fingerprint, manifest)
+  5: integration_pr                       → next
 ]
+@merge_conflict → resolve [strategy: priority, fallback: lww,
+                            supervisor_weight: 5.0, worker_weight: 1.0]
 @rule → enforce [never_edit_unowned_files]
 @rule → enforce [imports_at_boundaries_only]
 @rule → enforce [no_signature_changes_without_consensus]
 @rule → enforce [tests_in_tests_dir_only]
+@rule → enforce [deltas_over_snapshots_for_sync]
 ```
 
 ---
@@ -277,15 +320,24 @@ Canonical form: `@router → select [model: qwen3:4b, confidence: 0.82]`
 @scale_6 → config [agents: 6, granularity: subpackage]
   @1a → own [tests: router+tiers+hardware]
   @1b → own [tests: memory+policy+tools+resilience]
-  @2a → own [scl: grammar+parser+emitter]
+  @2a → own [scl: grammar+parser+emitter+delta]
   @2b → own [scl: bridge+audit]
   @3a → own [braille: codec+bench]
   @3b → own [braille: fingerprint+manifest]
 
 @scale_12 → config [agents: 12, granularity: module]
 @scale_100 → config [agents: 100, granularity: function]
-  @coordination → require [task_queue, scl_manifest_per_task, braille_dedup, cortex_as_coordinator]
+  @coordination → require [delta_stream, scl_manifest_per_task, braille_dedup, cortex_as_coordinator]
+  @gossip → require [broadcast: fingerprinted_deltas, protocol: crdt_merge,
+                      convergence: hamming_threshold, conflict: priority_weighted]
   @meta → note [scl_becomes_self_hosting: coordination_protocol_IS_semantic_substrate]
+  @meta → note [at_scale_100: agents_sync_via_delta_streams_not_full_state]
+
+@scale_infinity → config [agents: unbounded, granularity: semantic_atom]
+  @sync → require [protocol: delta_gossip, payload: braille_fingerprinted_mutations]
+  @convergence → check [method: hamming_distance_on_fingerprints, threshold: 0.9]
+  @conflict → resolve [concurrent: vector_clock, strategy: priority|lww|union]
+  @time_travel → enable [rollback: delta_stream_replay, debug: isolate_rogue_agent]
 ```
 
 ---
@@ -293,20 +345,21 @@ Canonical form: `@router → select [model: qwen3:4b, confidence: 0.82]`
 ## Success Criteria
 
 ```scl
-@week_1 → require [
-  agent_1: all_modules_tested,
-  agent_2: grammar_defined+parser_roundtrips,
-  agent_3: codec_bijective+bench_published
-]
-@week_2 → require [
-  agent_2: bridge_all_cortex_types,
-  agent_3: fingerprints_on_scl_records,
-  integration: route_cmd_outputs_scl+audit_has_braille_signatures
-]
+@week_1 → mutate [status: complete]
+  @agent_1 → deliver [all_modules_tested: ✓]
+  @agent_2 → deliver [grammar_defined: ✓, parser_roundtrips: ✓, types: ✓]
+  @agent_3 → deliver [codec_bijective: ✓]
+
+@week_2 → mutate [status: complete]
+  @agent_2 → deliver [bridge_all_cortex_types: ✓, delta_layer: ✓, tests_43_passing: ✓]
+  @agent_3 → deliver [fingerprints_on_scl_records: ✓, manifests: ✓]
+  @whitepaper → deliver [updated_with_scl_braille_deltas: ✓]
+
 @week_3 → require [
   scl: native_audit_format,
   braille: in_daemon_status,
+  delta: gossip_protocol_over_network,
   all: merged+green,
-  whitepaper: updated_with_scl_braille
+  integration_pr: complete
 ]
 ```
