@@ -359,8 +359,13 @@ async def handle_chat_completions(
         }
 
     # Forward to the backend
+    # If client sent model="auto" or empty, replace with the actual backend model
     model_name = backend.model.ollama_tag or backend.model.model_id
-    forward_body = {**request_body, "model": model_name}
+    client_model = request_body.get("model", "")
+    if not client_model or client_model.lower() in ("auto", "default", "cortex"):
+        forward_body = {**request_body, "model": model_name}
+    else:
+        forward_body = {**request_body}
 
     target_url = f"{backend.url}/v1/chat/completions"
 

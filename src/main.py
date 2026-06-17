@@ -5,8 +5,10 @@ Usage:
     python -m src detect              # Detect hardware and show optimal config
     python -m src detect --json        # Output as JSON
     python -m src tiers                # Show which model tiers fit on this system
+    python -m src models              # Show all discovered Ollama models mapped to tiers
     python -m src route "prompt"        # Route a prompt to the appropriate tier
     python -m src serve                # Launch the optimal inference server
+    python -m src smoke               # Smoke test the daemon
     python -m src benchmark            # Benchmark TTFT against a running server
 """
 
@@ -257,6 +259,166 @@ def cmd_benchmark(args):
         print("\nNo successful runs. Is the server running?")
 
 
+def cmd_models(args):
+    """Show all Ollama models mapped to tiers."""
+    from .tiers import print_discovered_models
+    print(print_discovered_models())
+
+
+def cmd_smoke(args):
+    """Smoke test the daemon — probes API compatibility, routing, and response shape."""
+    import urllib.request
+
+    base_url = args.url.rstrip("/")
+    passed = 0
+    failed = 0
+
+    def probe(name, method, path, body=None, expect_keys=None, expect_status=200):
+        nonlocal passed, failed
+        url = f"{base_url}{path}"
+        print(f"\n{'─' * 50}")
+        print(f"TEST: {name}")
+        print(f"  {method} {url}")
+
+        try:
+            data = json.dumps(body).encode() if body else None
+            req = urllib.request.Request(
+                url, data=data,
+                headers={"Content-Type": "application/json"} if body else {},
+                method=method,
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                status = resp.status
+                result = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            status = e.code
+            try:
+                result = json.loads(e.read())
+            except Exception:
+                result = {}
+        except urllib.error.URLError as e:
+            print(f"  ✗ FAIL — cannot connect: {e.reason}")
+            print(f"  Is the daemon running? Start with: python -m src daemon")
+            failed += 1
+            return None
+        except Exception as e:
+            print(f"  ✗ FAIL — {e}")
+            failed += 1
+            return None
+
+        if status != expect_status:
+            print(f"  ✗ FAIL — expected {expect_status}, got {status}")
+            failed += 1
+            return result
+
+        if expect_keys:
+            missing = [k for k in expect_keys if k not in result]
+            if missing:
+                print(f"  ✗ FAIL — missing keys: {missing}")
+                print(f"  Got: {json.dumps(result, indent=2)[:300]}")
+                failed += 1
+                return result
+
+        print(f"  ✓ PASS (status={status})")
+        if body and "messages" in body:
+            routing = result.get("_routing", {})
+            if routing:
+                print(f"  Routed to: {routing.get('tier', '?')} "
+                      f"({routing.get('category', '?')}, "
+                      f"conf={routing.get('confidence', '?')})")
+                print(f"  Backend model: {routing.get('backend_model', '?')}")
+
+        passed += 1
+        return result
+
+    print("=" * 50)
+    print("  CORTEX SMOKE TEST")
+    print(f"  Target: {base_url}")
+    print("=" * 50)
+
+    # 1. Health check
+    probe("Health endpoint", "GET", "/health",
+          expect_keys=["status", "uptime_seconds"])
+
+    # 2. Models list
+    probe("List models", "GET", "/v1/models",
+          expect_keys=["object", "data"])
+
+    # 3. Status endpoint
+    probe("Status endpoint", "GET", "/status",
+          expect_keys=["daemon", "system", "backends"])
+
+    # 4. API compatibility — minimal ping
+    probe("Chat completion (ping)", "POST", "/v1/chat/completions",
+          body={
+              "model": "auto",
+              "messages": [{"role": "user", "content": "Say pong."}],
+              "max_tokens": 5,
+          },
+          expect_keys=["id", "object", "choices"])
+
+    # 5. Routing test — code task
+    probe("Routing: code task", "POST", "/v1/chat/completions",
+          body={
+              "model": "auto",
+              "messages": [{"role": "user", "content":
+                  "Write a Python function that implements a red-black tree "
+                  "with insert, delete, and rebalance operations. Include type hints."}],
+              "max_tokens": 50,
+          },
+          expect_keys=["id", "choices"])
+
+    # 6. Routing test — simple question
+    probe("Routing: simple question", "POST", "/v1/chat/completions",
+          body={
+              "model": "auto",
+              "messages": [{"role": "user", "content": "What is 2+2?"}],
+              "max_tokens": 10,
+          },
+          expect_keys=["id", "choices"])
+
+    # 7. Responses API
+    probe("Responses API translation", "POST", "/v1/responses",
+          body={
+              "model": "auto",
+              "input": "Say hello.",
+              "max_output_tokens": 10,
+          },
+          expect_keys=["id", "object", "output_text"])
+
+    # 8. Anthropic Messages API
+    probe("Anthropic Messages API translation", "POST", "/v1/messages",
+          body={
+              "model": "auto",
+              "system": "You are helpful.",
+              "messages": [{"role": "user", "content": "Say hi."}],
+              "max_tokens": 10,
+          },
+          expect_keys=["id", "type", "content"])
+
+    # 9. Custom prompt if provided
+    if args.prompt:
+        probe(f"Custom prompt", "POST", "/v1/chat/completions",
+              body={
+                  "model": "auto",
+                  "messages": [{"role": "user", "content": args.prompt}],
+                  "max_tokens": 100,
+              },
+              expect_keys=["id", "choices"])
+
+    # Summary
+    total = passed + failed
+    print(f"\n{'=' * 50}")
+    print(f"  RESULTS: {passed}/{total} passed, {failed} failed")
+    if failed == 0:
+        print("  All smoke tests passed!")
+    else:
+        print(f"  {failed} test(s) failed.")
+    print(f"{'=' * 50}")
+
+    sys.exit(1 if failed else 0)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="cortex",
@@ -293,8 +455,16 @@ def main():
     p_daemon.add_argument("--port", type=int, default=11411, help="Proxy port (default: 11411)")
     p_daemon.add_argument("--simulate", "-s", metavar="PROFILE", help=sim_help)
 
+    # models
+    sub.add_parser("models", help="Show all Ollama models mapped to tiers")
+
     # serve
     p_serve = sub.add_parser("serve", help="Launch optimal inference server (single model)")
+
+    # smoke
+    p_smoke = sub.add_parser("smoke", help="Smoke test the daemon (API compatibility probe)")
+    p_smoke.add_argument("--url", default="http://localhost:11411", help="Daemon URL")
+    p_smoke.add_argument("--prompt", default=None, help="Custom prompt")
 
     # benchmark
     p_bench = sub.add_parser("benchmark", help="Benchmark TTFT")
@@ -313,12 +483,16 @@ def main():
         cmd_route(args)
     elif args.command == "simulate-all":
         cmd_simulate_all(args)
+    elif args.command == "models":
+        cmd_models(args)
     elif args.command == "daemon":
         from .daemon import run_daemon
         profile = _get_profile(args)
         run_daemon(host=args.host, port=args.port, profile=profile)
     elif args.command == "serve":
         cmd_serve(args)
+    elif args.command == "smoke":
+        cmd_smoke(args)
     elif args.command == "benchmark":
         cmd_benchmark(args)
     else:

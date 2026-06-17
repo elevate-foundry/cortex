@@ -400,6 +400,175 @@ NVIDIA_VLLM_OVERRIDES: dict[Tier, list[TierModel]] = {
 }
 
 
+def _parse_param_size(param_str: str) -> float:
+    """Parse Ollama's parameter_size string to billions. E.g. '7B' → 7.0, '751.63M' → 0.75."""
+    if not param_str:
+        return 0.0
+    param_str = param_str.strip().upper()
+    try:
+        if param_str.endswith("B"):
+            return float(param_str[:-1])
+        elif param_str.endswith("M"):
+            return float(param_str[:-1]) / 1000.0
+        elif param_str.endswith("K"):
+            return float(param_str[:-1]) / 1_000_000.0
+        else:
+            return float(param_str)
+    except ValueError:
+        return 0.0
+
+
+def _params_to_tier(params_b: float) -> Optional[Tier]:
+    """Map a parameter count (in billions) to the appropriate tier."""
+    if params_b <= 0:
+        return None
+    if params_b <= 1.0:
+        return Tier.L0
+    if params_b <= 2.5:
+        return Tier.L1
+    if params_b <= 5.0:
+        return Tier.L2
+    if params_b <= 10.0:
+        return Tier.L3
+    if params_b <= 16.0:
+        return Tier.L4
+    if params_b <= 35.0:
+        return Tier.L5
+    if params_b <= 80.0:
+        return Tier.L6
+    return None  # too large for any local tier
+
+
+def _estimate_vram_mb(size_bytes: int, params_b: float) -> int:
+    """Estimate VRAM needed from file size or param count."""
+    if size_bytes > 0:
+        # File size is a good proxy — model + overhead ~= 1.1x file size
+        return int(size_bytes / 1e6 * 1.1)
+    # Rough estimate: Q4 ≈ 0.6 GB per billion params
+    return int(params_b * 600)
+
+
+def _normalize_family(ollama_family: str) -> str:
+    """Normalize Ollama family names to Cortex family names."""
+    f = ollama_family.lower().strip()
+    # Map variations to canonical family names
+    family_map = {
+        "qwen3": "qwen",
+        "qwen35": "qwen",
+        "qwen2": "qwen",
+        "llama": "llama",
+        "gemma": "gemma",
+        "gemma3": "gemma",
+        "phi3": "phi",
+        "granite": "granite",
+        "nomic-bert": "nomic",
+    }
+    return family_map.get(f, f)
+
+
+# Patterns to skip — embedding models, custom fine-tunes that aren't general-purpose
+_SKIP_PATTERNS = {"nomic-embed", "embed"}
+
+
+def discover_ollama_models(
+    ollama_url: str = "http://localhost:11434",
+) -> dict[Tier, list[TierModel]]:
+    """
+    Query Ollama's /api/tags endpoint and map installed models to tiers.
+
+    Returns a dict of Tier → list of TierModel for every model installed
+    in Ollama that can be assigned to a tier.
+
+    This discovers models that aren't in the hardcoded catalogs —
+    your local llama3.3:70b, phi4, deepseek-r1, gemma3:4b, etc.
+    """
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            import json
+            data = json.loads(resp.read())
+    except Exception:
+        return {}
+
+    discovered: dict[Tier, list[TierModel]] = {}
+    seen_tags: set[str] = set()
+
+    # Collect all ollama tags already in the hardcoded catalogs
+    for catalog in (UNIVERSAL_CATALOG, CHALLENGE_CATALOG):
+        for models in catalog.values():
+            for m in models:
+                if m.ollama_tag:
+                    seen_tags.add(m.ollama_tag)
+
+    for model_info in data.get("models", []):
+        tag = model_info.get("name", "")
+        details = model_info.get("details", {})
+        param_str = details.get("parameter_size", "")
+        family_raw = details.get("family", "")
+        quant = details.get("quantization_level", "Q4_K_M")
+        fmt = details.get("format", "gguf")
+        size_bytes = model_info.get("size", 0)
+
+        # Skip if already in hardcoded catalog
+        if tag in seen_tags:
+            continue
+
+        # Skip embedding models
+        if any(skip in tag.lower() for skip in _SKIP_PATTERNS):
+            continue
+
+        params_b = _parse_param_size(param_str)
+        tier = _params_to_tier(params_b)
+        if tier is None:
+            continue
+
+        family = _normalize_family(family_raw)
+        vram_mb = _estimate_vram_mb(size_bytes, params_b)
+
+        # Default context based on tier
+        ctx_defaults = {
+            Tier.L0: 4096, Tier.L1: 4096, Tier.L2: 8192,
+            Tier.L3: 8192, Tier.L4: 8192, Tier.L5: 8192,
+            Tier.L6: 8192,
+        }
+
+        tm = TierModel(
+            model_id=tag,
+            quant=quant,
+            format=fmt,
+            vram_mb=vram_mb,
+            context_default=ctx_defaults.get(tier, 8192),
+            family=family,
+            ollama_tag=tag,
+        )
+
+        if tier not in discovered:
+            discovered[tier] = []
+        discovered[tier].append(tm)
+
+    return discovered
+
+
+# Module-level cache for discovered models
+_ollama_discovered: Optional[dict[Tier, list[TierModel]]] = None
+
+
+def _get_discovered() -> dict[Tier, list[TierModel]]:
+    """Lazy-load Ollama model discovery (cached)."""
+    global _ollama_discovered
+    if _ollama_discovered is None:
+        _ollama_discovered = discover_ollama_models()
+    return _ollama_discovered
+
+
+def refresh_ollama_discovery():
+    """Force re-scan of Ollama models (call after pulling/removing models)."""
+    global _ollama_discovered
+    _ollama_discovered = None
+
+
 def get_models_for_tier(
     tier: Tier,
     profile: SystemProfile,
@@ -411,6 +580,7 @@ def get_models_for_tier(
       1. If NVIDIA + vLLM available → try AWQ overrides first, then GGUF
       2. Otherwise → GGUF (works on Metal, CUDA, ROCm, CPU)
       3. L7 → always API
+      4. Append any additional Ollama-discovered models not in the catalog
     """
     from .hardware_detect import AcceleratorType
 
@@ -426,6 +596,11 @@ def get_models_for_tier(
     # Always include universal GGUF models as fallback
     if tier in UNIVERSAL_CATALOG:
         models.extend(UNIVERSAL_CATALOG[tier])
+
+    # Append discovered Ollama models not already in catalog
+    discovered = _get_discovered()
+    if tier in discovered:
+        models.extend(discovered[tier])
 
     return models
 
@@ -454,12 +629,62 @@ def get_all_models_for_tier(
     profile: SystemProfile,
 ) -> list[TierModel]:
     """
-    Get ALL models for a tier — core + challenge.
+    Get ALL models for a tier — core + challenge + discovered.
     Used by the swarm for maximum cross-family coverage.
     """
     core = get_models_for_tier(tier, profile)
     challenge = CHALLENGE_CATALOG.get(tier, [])
-    return core + challenge
+
+    # Deduplicate by ollama_tag
+    seen = {m.ollama_tag for m in core if m.ollama_tag}
+    extra = [m for m in challenge if not m.ollama_tag or m.ollama_tag not in seen]
+
+    return core + extra
+
+
+def print_discovered_models() -> str:
+    """Show all Ollama-discovered models mapped to tiers."""
+    discovered = discover_ollama_models()
+    if not discovered:
+        return "No additional Ollama models discovered (is Ollama running?)"
+
+    lines = [
+        "=== Discovered Ollama Models ===",
+        "",
+        f"{'Model':<50s} {'Family':<12s} {'Params':>8s} {'VRAM MB':>8s} {'Tier':<5s} {'Quant':<10s}",
+        "─" * 95,
+    ]
+
+    total = 0
+    for tier in sorted(discovered.keys()):
+        for m in discovered[tier]:
+            params_b = _parse_param_size(
+                # Reverse-estimate from VRAM if needed
+                f"{m.vram_mb / 600:.1f}B" if m.vram_mb > 0 else "?"
+            )
+            lines.append(
+                f"{m.ollama_tag or m.model_id:<50s} {m.family:<12s} "
+                f"{'?':>8s} {m.vram_mb:>8,} {tier.name:<5s} {m.quant:<10s}"
+            )
+            total += 1
+
+    lines.append("")
+    lines.append(f"Total discovered: {total} (not in hardcoded catalog)")
+
+    # Also show catalog models
+    lines.append("")
+    lines.append("=== Catalog Models (hardcoded) ===")
+    lines.append("")
+    for catalog_name, catalog in [("Core", UNIVERSAL_CATALOG), ("Challenge", CHALLENGE_CATALOG)]:
+        for tier in sorted(catalog.keys()):
+            for m in catalog[tier]:
+                installed = "✓" if m.ollama_tag else " "
+                lines.append(
+                    f"  {installed} {tier.name} [{catalog_name:9s}] "
+                    f"{m.ollama_tag or m.model_id:<40s} {m.family:<10s} {m.vram_mb:>6,} MB"
+                )
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
