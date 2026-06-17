@@ -692,6 +692,54 @@ Convergence is detected by comparing content hashes — O(N) against a reference
 | `convergence_matrix()` | Pairwise Braille fingerprint similarity for diagnostics |
 | `to_scl_document()` | Export full swarm state as auditable SCL |
 
+### 13.8 Executable SCL — The Evaluator
+
+SCL records are not only data — they are executable rules. The evaluator (`src/scl/eval.py`) turns SCL into a self-modifying programming language that agents can write, gossip, and execute at runtime.
+
+**Rule grammar** (extends base SCL):
+
+```scl
+@rule_name → when [key: >threshold, action: escalate, target: L5]
+@agent → define [fn: triage, body: "@task → classify [category: $type]"]
+@agent → mutate [fn.triage.body: "@task → classify [category: $type, urgency: critical]"]
+```
+
+The `when` verb defines conditional rules. The `define` verb creates named functions with `$var` templates. The `mutate` verb rewrites functions and rules at runtime — and those mutations propagate via delta gossip.
+
+**Condition operators:**
+
+| Operator | Meaning | Example |
+|----------|---------|---------|
+| `>` `>=` `<` `<=` | Numeric comparison | `complexity: >0.8` |
+| `==` `!=` | Equality | `status: ==idle` |
+| `in` `not_in` | Set membership | `tier: in L3,L4,L5` |
+| `~` | Regex match | `model: ~qwen.*` |
+| `exists` | Key presence | `error: exists` |
+
+Conditions compose with logical operators from the SCL symbol table: `∧` (and), `∨` (or), `¬` (not).
+
+**Actions:**
+
+| Type | Effect |
+|------|--------|
+| `emit` | Produce a new SCL record (with `$var` substitution) |
+| `mutate` | Modify agent state via delta |
+| `escalate` | Route to a higher tier |
+| `call` | Invoke a named SCL function |
+| `chain` | Trigger another rule |
+| `log` | Emit to audit trail |
+| `suppress` | Block the triggering record |
+
+**Self-modification** is the key capability: an agent can rewrite its own rules and functions by emitting SCL `define` or `when` records. These records are deltas — they propagate through gossip, so when one agent learns a better triage strategy, the entire swarm adopts it in O(log N) rounds.
+
+```
+Agent A defines:  @a → define [fn: triage, body: "...v1..."]
+Agent A mutates:  @a → define [fn: triage, body: "...v2..."]    # delta
+Gossip:           ΔS propagates to all peers → all agents now run v2
+```
+
+This closes the loop: **Layer 0** (types) provides structure, **Layer 1** (deltas) provides mutation, **Layer 2** (gossip) provides propagation, and **Layer 3** (eval) provides execution. Agents can dynamically write, refactor, and distribute their own task logic in SCL.
+
 ---
 
 ## 14. Braille Encoding Layer

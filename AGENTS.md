@@ -13,7 +13,7 @@
 @cortex → has [hardware_detect, tiers, router, backend_adapter, backend_selector,
                model_manager, challenger, swarm, cortex, daemon, api_adapter,
                memory, policy, tools, resilience, main,
-               scl_types, scl_parser, scl_emitter, scl_grammar, scl_bridge, scl_delta, scl_gossip,
+               scl_types, scl_parser, scl_emitter, scl_grammar, scl_bridge, scl_delta, scl_gossip, scl_eval,
                braille_codec, braille_fingerprint, braille_manifest]
 @cortex → mutate [missing: [cli_polish, docs, tokenizer_bench, audit_scl_format]]
 @cortex → mutate [needs: [audit_integration, daemon_braille_status, cluster_head_election]]
@@ -79,10 +79,10 @@ document   := record ('\n' record)*
 
 @agent_2 → own [src/scl/__init__.py, src/scl/types.py, src/scl/parser.py,
                  src/scl/emitter.py, src/scl/cortex_bridge.py, src/scl/grammar.py,
-                 src/scl/delta.py, src/scl/gossip.py,
+                 src/scl/delta.py, src/scl/gossip.py, src/scl/eval.py,
                  tests/test_scl_parser.py, tests/test_scl_emitter.py,
                  tests/test_scl_bridge.py, tests/test_scl_delta.py,
-                 tests/test_scl_gossip.py]
+                 tests/test_scl_gossip.py, tests/test_scl_eval.py]
 
 @agent_3 → own [src/braille/__init__.py, src/braille/codec.py,
                  src/braille/fingerprint.py, src/braille/manifest.py,
@@ -263,6 +263,28 @@ Canonical form: `@router → select [model: qwen3:4b, confidence: 0.82]`
 @convergence → measure [5_agents: 1_round, 50_agents: 4_rounds, scaling: O_log_N]
 @protocol → define [ping: fingerprint_compare, push_delta: changed_keys_only,
                      dedup: content_keyed_seen_set, anti_entropy: push_pull]
+```
+
+### Phase 6: Executable SCL — Evaluator ✓
+
+```scl
+@eval → implement [Condition, CompoundCondition, Action, Rule, SCLFunction, RuleEngine]
+@eval → mutate [status: complete, file: src/scl/eval.py]
+@conditions → implement [ops: == != > >= < <= in not_in ~ exists,
+                          logic: ∧_and ∨_or ¬_not]
+@actions → implement [emit, mutate, escalate, call, chain, log, suppress]
+@functions → implement [define: λ_abstraction, invoke: $var_substitution,
+                         versioned: auto_increment, self_modify: via_delta]
+@meta → implement [process_meta: when+define+undefine+enable+disable,
+                    self_modifying: agents_rewrite_own_rules_via_scl]
+@rules → serialize [to_scl: @name → when [...], from_scl: parse_when_record]
+@layer_stack → define [
+  L0: types.py_structure,
+  L1: delta.py_mutation,
+  L2: gossip.py_propagation,
+  L3: eval.py_execution,
+  L4: agents_rewrite_L3_via_L1_deltas_gossipped_by_L2
+]
 ```
 
 ---
