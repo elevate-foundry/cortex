@@ -48,7 +48,7 @@ class RouteDecision:
 
 # Keywords/patterns that suggest higher complexity
 _CODE_PATTERNS = re.compile(
-    r'\b(code|function|class|implement|refactor|bug|error|debug|fix|compile|test|unittest)\b',
+    r'\b(code|function|class|implement|refactor|bug|error|debug|fix|compil\w*|test|unittest|write\s+(?:a\s+)?(?:program|script|compiler|parser|server|app|module|library)|build\s+(?:a\s+)?(?:program|compiler|parser|server|app|module|library)|program|algorithm|data.?struct)\b',
     re.IGNORECASE,
 )
 _PLAN_PATTERNS = re.compile(
