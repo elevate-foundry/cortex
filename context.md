@@ -66,3 +66,112 @@ Cross-family agreement increases confidence — if models from different familie
 4. **Agreement → done** — If they agree, return with high confidence.
 5. **Disagreement → swarm** — Fan out to more families. More disagreement → larger swarm.
 6. **Hardest problems** — Large swarm across all available sizes and families; use weighted voting (larger models get more weight) or an LLM-as-judge step.
+
+## Implementation Modules
+
+| Module | File | Role |
+|--------|------|------|
+| Hardware Detection | `hardware_detect.py` | Detect CPU, GPU, RAM, backends |
+| Tier System | `tiers.py` | L0–L7 specs, model catalogs (core + challenge), feasibility |
+| Router | `router.py` | Classify requests → pick tier (heuristic or L0 model) |
+| Backend Adapter | `backend_adapter.py` | Unified interface over Ollama / llama.cpp / vLLM / OpenAI API |
+| API Adapter | `api_adapter.py` | Translate Responses API / Anthropic / multimodal → Chat Completions |
+| Model Manager | `model_manager.py` | Systemd for models: boot, load, evict, health-check, VRAM budget |
+| Challenger | `challenger.py` | Cross-family verification: compare core vs challenge model answers |
+| Swarm | `swarm.py` | Fan-out to N models, cluster votes, weighted consensus |
+| Cortex | `cortex.py` | Top-level orchestrator: Router → Manager → Challenger → Swarm |
+| Backend Selector | `backend_selector.py` | Pick optimal backend + config for a system profile |
+| Daemon | `daemon.py` | HTTP proxy server: accepts all API formats, routes through Cortex |
+
+## API Compatibility Layer
+
+Apps using OpenAI-compatible Chat Completions work natively. Apps using newer or provider-specific APIs need translation. The `api_adapter.py` module handles this.
+
+### Compatibility matrix
+
+| API Format | Endpoint | Status | Strategy |
+|------------|----------|--------|----------|
+| OpenAI Chat Completions | `POST /v1/chat/completions` | Native | Pass-through |
+| OpenAI Responses API | `POST /v1/responses` | Translated | `input[]` → `messages[]`, `output[]` → `choices[]` |
+| Anthropic Messages | `POST /v1/messages` | Translated | `content[]` blocks → text, `system` string → system message |
+| Tool calling | (any endpoint) | Pass-through | `tools[]` forwarded to backend |
+| Multimodal (vision) | (any endpoint) | Text-extracted | Images described as `[image: ...]` for text-only models |
+| Multimodal (audio) | (any endpoint) | Text-extracted | Audio described as `[audio content]` |
+| Built-in tools | `POST /v1/responses` | Noted/stripped | `web_search`, `code_interpreter`, `computer_use` logged but not executed locally |
+| Computer-use | (any endpoint) | Stripped | Not supported locally, noted in logs |
+| MCP tool refs | `POST /v1/responses` | Stripped | MCP server references logged |
+
+### Translation flow
+
+```
+Client Request (any format)
+    │
+    ▼
+┌─────────────────┐
+│  API Adapter     │  normalize_request()
+│  (api_adapter.py)│  detect format from path + body
+└────────┬────────┘
+         │  NormalizedRequest (messages[] + tools[])
+         ▼
+┌─────────────────┐
+│  Cortex Pipeline │  route → generate → challenge → swarm
+└────────┬────────┘
+         │  CompletionResponse
+         ▼
+┌─────────────────┐
+│  API Adapter     │  format_response()
+│  (api_adapter.py)│  convert back to client's format
+└────────┬────────┘
+         │
+         ▼
+Client Response (matching format)
+```
+
+### What works out of the box
+
+- **Cursor, VS Code, Cline, aider**: Use Chat Completions → native
+- **OpenAI Python SDK (responses)**: Uses Responses API → translated
+- **Anthropic Python SDK**: Uses Messages API → translated
+- **LangChain, LlamaIndex**: Use Chat Completions → native
+- **Open WebUI, Continue**: Use Chat Completions → native
+
+### Pipeline flow
+
+```
+User Request
+    │
+    ▼
+┌─────────┐   classify    ┌──────────┐
+│  Router  │──────────────▶│ Tier Lx  │
+│  (L0)    │               └────┬─────┘
+└─────────┘                     │
+                                ▼
+                    ┌───────────────────┐
+                    │ Core Model (Qwen3)│
+                    │   generates answer│
+                    └────────┬──────────┘
+                             │
+                    confidence < 0.75?
+                      ┌──────┴──────┐
+                      │ no          │ yes
+                      ▼             ▼
+                   Return    ┌────────────┐
+                             │ Challenger  │
+                             │ (diff family)│
+                             └──────┬─────┘
+                                    │
+                              agree?
+                         ┌──────┴──────┐
+                         │ yes         │ no
+                         ▼             ▼
+                      Return    ┌──────────┐
+                                │  Swarm   │
+                                │ (3-5+ models)│
+                                └──────┬───┘
+                                       │
+                                 consensus?
+                            ┌──────┴──────┐
+                            │ yes         │ no
+                            ▼             ▼
+                         Return    Escalate to L7
+```

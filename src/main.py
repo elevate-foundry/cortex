@@ -287,8 +287,14 @@ def main():
     # simulate-all
     sub.add_parser("simulate-all", help="Run all simulated profiles")
 
+    # daemon
+    p_daemon = sub.add_parser("daemon", help="Start the OS-level inference proxy daemon")
+    p_daemon.add_argument("--host", default="127.0.0.1", help="Bind address")
+    p_daemon.add_argument("--port", type=int, default=11411, help="Proxy port (default: 11411)")
+    p_daemon.add_argument("--simulate", "-s", metavar="PROFILE", help=sim_help)
+
     # serve
-    p_serve = sub.add_parser("serve", help="Launch optimal inference server")
+    p_serve = sub.add_parser("serve", help="Launch optimal inference server (single model)")
 
     # benchmark
     p_bench = sub.add_parser("benchmark", help="Benchmark TTFT")
@@ -307,6 +313,10 @@ def main():
         cmd_route(args)
     elif args.command == "simulate-all":
         cmd_simulate_all(args)
+    elif args.command == "daemon":
+        from .daemon import run_daemon
+        profile = _get_profile(args)
+        run_daemon(host=args.host, port=args.port, profile=profile)
     elif args.command == "serve":
         cmd_serve(args)
     elif args.command == "benchmark":
