@@ -157,6 +157,13 @@ class Peer:
             )
             self.stream.append(bootstrap)
 
+        # Track seen deltas for dedup (content-keyed)
+        self._seen_deltas: set[tuple] = set()
+        if initial_state and initial_state.entries:
+            boot_key = (agent_id, frozenset(initial_state.entries.items()),
+                        frozenset())
+            self._seen_deltas.add(boot_key)
+
         # Last known fingerprint per peer (for anti-entropy)
         self._peer_fingerprints: dict[str, str] = {}
         # Last known stream position per peer (for delta exchange)
@@ -183,16 +190,22 @@ class Peer:
         self.stream.append(delta)
         return delta
 
-    def receive_delta(self, delta: Delta) -> SemanticState:
-        """Receive and apply a delta from another peer."""
+    def receive_delta(self, delta: Delta) -> Optional[SemanticState]:
+        """Receive and apply a delta from another peer.
+
+        Returns new state if applied, None if delta was already seen.
+        """
+        # Dedup: skip if this exact mutation is already in our stream
+        delta_key = (delta.agent_id, frozenset(delta.set_keys.items()),
+                     frozenset(delta.delete_keys))
+        if delta_key in self._seen_deltas:
+            return None
+        self._seen_deltas.add(delta_key)
         return self.stream.append(delta)
 
-    def deltas_since(self, position: int) -> list[Delta]:
-        """Get all deltas after stream position `position`."""
-        all_deltas = self.stream.deltas
-        if position >= len(all_deltas):
-            return []
-        return all_deltas[position:]
+    def own_deltas(self) -> list[Delta]:
+        """Get deltas that originated from this peer."""
+        return [d for d in self.stream.deltas if d.agent_id == self.agent_id]
 
     # ------------------------------------------------------------------
     # Gossip protocol
@@ -242,10 +255,11 @@ class Peer:
             self.stats.fingerprint_misses += 1
             other.stats.fingerprint_misses += 1
 
-            # Other sends its deltas since our last known position
-            last_known_pos = other._peer_positions.get(self.agent_id, 0)
-            other_deltas = other.deltas_since(last_known_pos)
+            # Exchange all deltas — receive_delta handles dedup
+            other_deltas = list(other.stream.deltas)
+            my_deltas = list(self.stream.deltas)
 
+            # Other → Self
             push_msg = GossipMessage(
                 msg_type=GossipMessageType.PUSH_DELTA,
                 sender=other.agent_id,
@@ -257,46 +271,41 @@ class Peer:
             messages.append(push_msg)
             other.stats.messages_sent += 1
             other.stats.bytes_sent += push_msg.byte_cost
-            other.stats.deltas_propagated += len(other_deltas)
 
-            # We apply their deltas
+            applied = 0
             self.stats.messages_received += 1
             self.stats.bytes_received += push_msg.byte_cost
             for d in other_deltas:
-                # Check for conflicts with our pending deltas
-                self.stream.append(d)
-                self.stats.deltas_propagated += 1
+                if self.receive_delta(d) is not None:
+                    applied += 1
+            self.stats.deltas_propagated += applied
+            other.stats.deltas_propagated += applied
 
-            # We send our deltas since their last known position
-            their_last_pos = self._peer_positions.get(other.agent_id, 0)
-            my_deltas = self.deltas_since(their_last_pos)
+            # Self → Other
+            push_back = GossipMessage(
+                msg_type=GossipMessageType.PUSH_DELTA,
+                sender=self.agent_id,
+                receiver=other.agent_id,
+                fingerprint=self.state_fingerprint(),
+                deltas=my_deltas,
+                clock=self.state.clock,
+            )
+            messages.append(push_back)
+            self.stats.messages_sent += 1
+            self.stats.bytes_sent += push_back.byte_cost
 
-            if my_deltas:
-                push_back = GossipMessage(
-                    msg_type=GossipMessageType.PUSH_DELTA,
-                    sender=self.agent_id,
-                    receiver=other.agent_id,
-                    fingerprint=self.state_fingerprint(),
-                    deltas=my_deltas,
-                    clock=self.state.clock,
-                )
-                messages.append(push_back)
-                self.stats.messages_sent += 1
-                self.stats.bytes_sent += push_back.byte_cost
-                self.stats.deltas_propagated += len(my_deltas)
-
-                # Other applies our deltas
-                other.stats.messages_received += 1
-                other.stats.bytes_received += push_back.byte_cost
-                for d in my_deltas:
-                    other.stream.append(d)
-                    other.stats.deltas_propagated += 1
+            applied_back = 0
+            other.stats.messages_received += 1
+            other.stats.bytes_received += push_back.byte_cost
+            for d in my_deltas:
+                if other.receive_delta(d) is not None:
+                    applied_back += 1
+            other.stats.deltas_propagated += applied_back
+            self.stats.deltas_propagated += applied_back
 
             # Update known state
-            self._peer_fingerprints[other.agent_id] = other.state_fingerprint()
-            other._peer_fingerprints[self.agent_id] = self.state_fingerprint()
-            self._peer_positions[other.agent_id] = other.stream.length
-            other._peer_positions[self.agent_id] = self.stream.length
+            self._peer_fingerprints[other.agent_id] = other_fp
+            other._peer_fingerprints[self.agent_id] = my_fp
 
         self.stats.rounds += 1
         other.stats.rounds += 1
@@ -409,23 +418,17 @@ class Swarm:
         return max_rounds
 
     def is_converged(self) -> bool:
-        """Check if all peers' state fingerprints are within threshold."""
+        """Check if all peers' states match.
+
+        Uses content_hash() for fast equality check (O(n)).
+        For threshold-based similarity, use convergence_matrix().
+        """
         if len(self.peers) < 2:
             return True
 
-        fps = [(pid, peer.state_fingerprint()) for pid, peer in self.peers.items()]
-
-        # Check all pairs
-        for i in range(len(fps)):
-            for j in range(i + 1, len(fps)):
-                fp_a = fps[i][1]
-                fp_b = fps[j][1]
-                if len(fp_a) != len(fp_b):
-                    return False
-                sim = similarity(fp_a, fp_b)
-                if sim < self.convergence_threshold:
-                    return False
-        return True
+        peers = list(self.peers.values())
+        ref_hash = peers[0].state.content_hash()
+        return all(p.state.content_hash() == ref_hash for p in peers[1:])
 
     def convergence_matrix(self) -> dict[str, dict[str, float]]:
         """Pairwise similarity matrix between all peers."""

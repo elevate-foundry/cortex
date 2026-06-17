@@ -13,10 +13,10 @@
 @cortex → has [hardware_detect, tiers, router, backend_adapter, backend_selector,
                model_manager, challenger, swarm, cortex, daemon, api_adapter,
                memory, policy, tools, resilience, main,
-               scl_types, scl_parser, scl_emitter, scl_grammar, scl_bridge, scl_delta,
+               scl_types, scl_parser, scl_emitter, scl_grammar, scl_bridge, scl_delta, scl_gossip,
                braille_codec, braille_fingerprint, braille_manifest]
 @cortex → mutate [missing: [cli_polish, docs, tokenizer_bench, audit_scl_format]]
-@cortex → mutate [needs: [audit_integration, daemon_braille_status, delta_gossip_protocol]]
+@cortex → mutate [needs: [audit_integration, daemon_braille_status, cluster_head_election]]
 ```
 
 ---
@@ -79,9 +79,10 @@ document   := record ('\n' record)*
 
 @agent_2 → own [src/scl/__init__.py, src/scl/types.py, src/scl/parser.py,
                  src/scl/emitter.py, src/scl/cortex_bridge.py, src/scl/grammar.py,
-                 src/scl/delta.py,
+                 src/scl/delta.py, src/scl/gossip.py,
                  tests/test_scl_parser.py, tests/test_scl_emitter.py,
-                 tests/test_scl_bridge.py, tests/test_scl_delta.py]
+                 tests/test_scl_bridge.py, tests/test_scl_delta.py,
+                 tests/test_scl_gossip.py]
 
 @agent_3 → own [src/braille/__init__.py, src/braille/codec.py,
                  src/braille/fingerprint.py, src/braille/manifest.py,
@@ -250,6 +251,20 @@ Canonical form: `@router → select [model: qwen3:4b, confidence: 0.82]`
                  test_cases: 43]
 ```
 
+### Phase 5: Gossip Protocol ✓
+
+```scl
+@gossip → implement [Peer, Swarm, GossipMessage, GossipMessageType, GossipStats]
+@gossip → mutate [status: complete, file: src/scl/gossip.py]
+@peer → implement [mutate, receive_delta, initiate_sync, state_fingerprint,
+                    dedup: content_keyed, bootstrap: initial_state_as_delta]
+@swarm → implement [add_peer, gossip_round, run_until_converged, is_converged,
+                     convergence_matrix, to_scl_document]
+@convergence → measure [5_agents: 1_round, 50_agents: 4_rounds, scaling: O_log_N]
+@protocol → define [ping: fingerprint_compare, push_delta: changed_keys_only,
+                     dedup: content_keyed_seen_set, anti_entropy: push_pull]
+```
+
 ---
 
 ## Agent 3: BRAILLE
@@ -358,7 +373,7 @@ Canonical form: `@router → select [model: qwen3:4b, confidence: 0.82]`
 @week_3 → require [
   scl: native_audit_format,
   braille: in_daemon_status,
-  delta: gossip_protocol_over_network,
+  gossip: ✓_epidemic_convergence_in_O_log_N,
   all: merged+green,
   integration_pr: complete
 ]
