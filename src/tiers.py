@@ -614,16 +614,38 @@ def get_challenge_models(
     """
     Get challenge models for a tier, optionally excluding a family.
     
-    Used by the challenger/swarm to pick models from different families
-    than the core model that produced the initial answer.
+    Sources (in preference order):
+      1. Hardcoded CHALLENGE_CATALOG (curated, known-good)
+      2. Discovered Ollama models from non-core families
+    
+    This means any model the user pulls into Ollama automatically
+    becomes available as a challenger — "infinity models".
     """
-    if tier not in CHALLENGE_CATALOG:
-        return []
+    models: list[TierModel] = []
+    seen_tags: set[str] = set()
 
-    if not exclude_family:
-        return list(CHALLENGE_CATALOG[tier])
+    # 1. Curated challenge catalog
+    if tier in CHALLENGE_CATALOG:
+        for m in CHALLENGE_CATALOG[tier]:
+            if exclude_family and m.family == exclude_family:
+                continue
+            models.append(m)
+            if m.ollama_tag:
+                seen_tags.add(m.ollama_tag)
 
-    return [m for m in CHALLENGE_CATALOG[tier] if m.family != exclude_family]
+    # 2. Discovered models from non-core families
+    discovered = _get_discovered()
+    if tier in discovered:
+        for m in discovered[tier]:
+            if exclude_family and m.family == exclude_family:
+                continue
+            if m.ollama_tag and m.ollama_tag in seen_tags:
+                continue
+            models.append(m)
+            if m.ollama_tag:
+                seen_tags.add(m.ollama_tag)
+
+    return models
 
 
 def get_all_models_for_tier(
@@ -857,6 +879,58 @@ def concurrent_vram_budget(profile: SystemProfile) -> dict:
             }
             for a in loaded
         ],
+    }
+
+
+def model_census(profile: SystemProfile) -> dict:
+    """
+    Complete census of all models available to Cortex — the "infinity models" view.
+    
+    Returns a structured dict with:
+      - catalog: hardcoded models per tier
+      - challenge: challenge catalog per tier
+      - discovered: dynamically found Ollama models per tier
+      - totals: model count, family count, tier coverage
+    """
+    discovered = discover_ollama_models()
+
+    all_families: set[str] = set()
+    all_models: int = 0
+
+    tiers_data = {}
+    for tier in Tier:
+        core = UNIVERSAL_CATALOG.get(tier, [])
+        challenge = CHALLENGE_CATALOG.get(tier, [])
+        disc = discovered.get(tier, [])
+
+        tier_families = set()
+        for m in core + challenge + disc:
+            tier_families.add(m.family)
+            all_families.add(m.family)
+
+        # Deduplicate by ollama_tag
+        seen = set()
+        unique = 0
+        for m in core + challenge + disc:
+            tag = m.ollama_tag or m.model_id
+            if tag not in seen:
+                seen.add(tag)
+                unique += 1
+        all_models += unique
+
+        tiers_data[tier.name] = {
+            "core": [{"model": m.ollama_tag or m.model_id, "family": m.family, "vram_mb": m.vram_mb} for m in core],
+            "challenge": [{"model": m.ollama_tag or m.model_id, "family": m.family, "vram_mb": m.vram_mb} for m in challenge],
+            "discovered": [{"model": m.ollama_tag or m.model_id, "family": m.family, "vram_mb": m.vram_mb} for m in disc],
+            "unique_models": unique,
+            "families": sorted(tier_families),
+        }
+
+    return {
+        "total_unique_models": all_models,
+        "total_families": len(all_families),
+        "families": sorted(all_families),
+        "tiers": tiers_data,
     }
 
 

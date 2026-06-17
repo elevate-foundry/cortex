@@ -42,6 +42,8 @@ from .tiers import (
     TIER_SPECS,
     max_feasible_tier,
     get_models_for_tier,
+    model_census,
+    refresh_ollama_discovery,
 )
 from .api_adapter import (
     normalize_request,
@@ -49,7 +51,7 @@ from .api_adapter import (
 )
 from .cortex import Cortex, CortexResponse
 from .memory import Memory
-from .tools import ToolRegistry
+from .tools import ToolRegistry, ToolCall, PermissionRing
 from .policy import PolicyEngine, PolicyContext
 from .resilience import ResilienceLayer
 
@@ -223,6 +225,10 @@ class DaemonServer:
                 await self._handle_set_policy(writer, body)
             elif path == "/v1/policies" and method == "GET":
                 await self._handle_get_policies(writer, headers)
+            elif path == "/v1/models/census" and method == "GET":
+                await self._handle_model_census(writer)
+            elif path == "/v1/models/discover" and method == "POST":
+                await self._handle_model_discover(writer)
             elif path == "/v1/tools" and method == "GET":
                 await self._handle_tools_list(writer)
             elif path == "/v1/resilience" and method == "GET":
@@ -715,6 +721,21 @@ class DaemonServer:
     # ------------------------------------------------------------------
     # Tools & Resilience endpoints
     # ------------------------------------------------------------------
+
+    async def _handle_model_census(self, writer):
+        """GET /v1/models/census — full census of all available models."""
+        census = model_census(self.profile)
+        await self._send_json(writer, 200, census)
+
+    async def _handle_model_discover(self, writer):
+        """POST /v1/models/discover — re-scan Ollama for new models."""
+        refresh_ollama_discovery()
+        census = model_census(self.profile)
+        await self._send_json(writer, 200, {
+            "status": "ok",
+            "message": f"Discovered {census['total_unique_models']} models across {census['total_families']} families",
+            "census": census,
+        })
 
     async def _handle_tools_list(self, writer):
         """GET /v1/tools — list all registered tools."""
