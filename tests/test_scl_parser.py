@@ -125,7 +125,7 @@ More prose
 
     def test_strict_mode_raises(self):
         text = """@task → classify [category: code]
-bad line here starting with @invalid"""
+@invalid_no_arrow_no_scope"""
         with pytest.raises(ValueError):
             parse_document(text, strict=True)
 
