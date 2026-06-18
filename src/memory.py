@@ -278,6 +278,37 @@ CREATE TABLE IF NOT EXISTS scl_audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_scl_audit_time    ON scl_audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_scl_audit_thread  ON scl_audit_log(thread_id);
+
+-- Routing feedback (self-modifying policy data)
+CREATE TABLE IF NOT EXISTS routing_feedback (
+    id                TEXT PRIMARY KEY,
+    request_id        TEXT NOT NULL DEFAULT '',
+    thread_id         TEXT NOT NULL DEFAULT '',
+    category          TEXT NOT NULL DEFAULT '',
+    routed_tier       TEXT NOT NULL DEFAULT '',
+    actual_model      TEXT NOT NULL DEFAULT '',
+    predicted_correct INTEGER NOT NULL DEFAULT 0,
+    user_correct      INTEGER,
+    tool_success      INTEGER NOT NULL DEFAULT 0,
+    latency_ms        REAL NOT NULL DEFAULT 0,
+    created_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_category ON routing_feedback(category, routed_tier);
+CREATE INDEX IF NOT EXISTS idx_feedback_model   ON routing_feedback(actual_model);
+CREATE INDEX IF NOT EXISTS idx_feedback_time    ON routing_feedback(created_at);
+
+-- Policy mutations (self-modifying policy audit)
+CREATE TABLE IF NOT EXISTS policy_mutations (
+    id          TEXT PRIMARY KEY,
+    tier        TEXT NOT NULL DEFAULT '',
+    field       TEXT NOT NULL DEFAULT '',
+    old_value   TEXT NOT NULL DEFAULT '',
+    new_value   TEXT NOT NULL DEFAULT '',
+    reason      TEXT NOT NULL DEFAULT '',
+    confidence  REAL NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_policy_mutations_time ON policy_mutations(created_at);
 """
 
 @dataclass
@@ -299,6 +330,50 @@ class SCLAuditEntry:
             "fingerprint": self.fingerprint,
             "created_at": self.created_at,
         }
+
+
+@dataclass
+class FeedbackEntry:
+    """A routing feedback entry for self-modifying policy."""
+    id: str
+    request_id: str
+    thread_id: str
+    category: str
+    routed_tier: str
+    actual_model: str
+    predicted_correct: int
+    user_correct: Optional[int]
+    tool_success: int
+    latency_ms: float
+    created_at: int
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "request_id": self.request_id,
+            "thread_id": self.thread_id,
+            "category": self.category,
+            "routed_tier": self.routed_tier,
+            "actual_model": self.actual_model,
+            "predicted_correct": self.predicted_correct,
+            "user_correct": self.user_correct,
+            "tool_success": self.tool_success,
+            "latency_ms": self.latency_ms,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass
+class PolicyMutation:
+    """A recorded policy mutation."""
+    id: str
+    tier: str
+    field: str
+    old_value: str
+    new_value: str
+    reason: str
+    confidence: float
+    created_at: int
 
 
 # ---------------------------------------------------------------------------
@@ -780,6 +855,200 @@ class Memory:
         }
 
     # ------------------------------------------------------------------
+    # Routing feedback (self-modifying policy)
+    # ------------------------------------------------------------------
+
+    def log_routing_feedback(
+        self,
+        request_id: str = "",
+        thread_id: str = "",
+        category: str = "",
+        routed_tier: str = "",
+        actual_model: str = "",
+        predicted_correct: int = 0,
+        user_correct: Optional[int] = None,
+        tool_success: int = 0,
+        latency_ms: float = 0.0,
+    ) -> FeedbackEntry:
+        """Log a routing feedback entry."""
+        now = _now_ms()
+        entry = FeedbackEntry(
+            id=_uuid(),
+            request_id=request_id,
+            thread_id=thread_id,
+            category=category,
+            routed_tier=routed_tier,
+            actual_model=actual_model,
+            predicted_correct=predicted_correct,
+            user_correct=user_correct,
+            tool_success=tool_success,
+            latency_ms=latency_ms,
+            created_at=now,
+        )
+        with self._tx() as c:
+            c.execute(
+                """INSERT INTO routing_feedback
+                   (id, request_id, thread_id, category, routed_tier,
+                    actual_model, predicted_correct, user_correct,
+                    tool_success, latency_ms, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (entry.id, entry.request_id, entry.thread_id,
+                 entry.category, entry.routed_tier, entry.actual_model,
+                 entry.predicted_correct, entry.user_correct,
+                 entry.tool_success, entry.latency_ms, entry.created_at),
+            )
+        return entry
+
+    def get_routing_accuracy(
+        self,
+        category: Optional[str] = None,
+        tier: Optional[str] = None,
+        model: Optional[str] = None,
+        days: int = 7,
+    ) -> dict:
+        """Compute routing accuracy statistics from feedback."""
+        cutoff_ms = _now_ms() - (days * 86400 * 1000)
+        conditions = ["created_at >= ?"]
+        params: list[Any] = [cutoff_ms]
+
+        if category:
+            conditions.append("category = ?")
+            params.append(category)
+        if tier:
+            conditions.append("routed_tier = ?")
+            params.append(tier)
+        if model:
+            conditions.append("actual_model = ?")
+            params.append(model)
+
+        where_clause = " AND ".join(conditions)
+
+        # Overall accuracy
+        total_row = self._conn.execute(
+            f"SELECT COUNT(*) as total FROM routing_feedback WHERE {where_clause}",
+            params,
+        ).fetchone()
+        total = total_row["total"] if total_row else 0
+
+        if total == 0:
+            return {"total": 0, "accuracy": None, "by_tier": {}, "by_model": {}}
+
+        # Predicted correct (our heuristic + tool_success proxy)
+        pred_row = self._conn.execute(
+            f"""SELECT SUM(predicted_correct) as pred_ok
+                FROM routing_feedback WHERE {where_clause}""",
+            params,
+        ).fetchone()
+        pred_ok = pred_row["pred_ok"] or 0
+
+        # User-confirmed correct (ground truth when available)
+        user_row = self._conn.execute(
+            f"""SELECT SUM(user_correct) as user_ok, COUNT(user_correct) as user_n
+                FROM routing_feedback WHERE {where_clause}""",
+            params,
+        ).fetchone()
+        user_ok = user_row["user_ok"] or 0
+        user_n = user_row["user_n"] or 0
+
+        # By tier
+        tier_rows = self._conn.execute(
+            f"""SELECT routed_tier as tier,
+                       COUNT(*) as total,
+                       SUM(predicted_correct) as pred_ok
+                FROM routing_feedback WHERE {where_clause}
+                GROUP BY routed_tier""",
+            params,
+        ).fetchall()
+        by_tier = {
+            r["tier"]: {
+                "total": r["total"],
+                "predicted_accuracy": round(r["pred_ok"] / max(r["total"], 1), 3),
+            }
+            for r in tier_rows
+        }
+
+        # By model
+        model_rows = self._conn.execute(
+            f"""SELECT actual_model as model,
+                       COUNT(*) as total,
+                       SUM(predicted_correct) as pred_ok
+                FROM routing_feedback WHERE {where_clause}
+                GROUP BY actual_model""",
+            params,
+        ).fetchall()
+        by_model = {
+            r["model"]: {
+                "total": r["total"],
+                "predicted_accuracy": round(r["pred_ok"] / max(r["total"], 1), 3),
+            }
+            for r in model_rows
+        }
+
+        return {
+            "total": total,
+            "predicted_accuracy": round(pred_ok / total, 3),
+            "user_confirmed_accuracy": round(user_ok / max(user_n, 1), 3) if user_n > 0 else None,
+            "user_confirmed_samples": user_n,
+            "by_tier": by_tier,
+            "by_model": by_model,
+        }
+
+    def record_policy_mutation(
+        self,
+        tier: str,
+        field: str,
+        old_value: str,
+        new_value: str,
+        reason: str,
+        confidence: float = 0.0,
+    ) -> PolicyMutation:
+        """Record a policy mutation for audit."""
+        now = _now_ms()
+        mutation = PolicyMutation(
+            id=_uuid(),
+            tier=tier,
+            field=field,
+            old_value=old_value,
+            new_value=new_value,
+            reason=reason,
+            confidence=confidence,
+            created_at=now,
+        )
+        with self._tx() as c:
+            c.execute(
+                """INSERT INTO policy_mutations
+                   (id, tier, field, old_value, new_value, reason, confidence, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (mutation.id, mutation.tier, mutation.field,
+                 mutation.old_value, mutation.new_value,
+                 mutation.reason, mutation.confidence, mutation.created_at),
+            )
+        return mutation
+
+    def get_policy_mutations(
+        self,
+        limit: int = 50,
+    ) -> list[PolicyMutation]:
+        """Get recent policy mutations."""
+        rows = self._conn.execute(
+            "SELECT * FROM policy_mutations ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            PolicyMutation(
+                id=r["id"],
+                tier=r["tier"],
+                field=r["field"],
+                old_value=r["old_value"],
+                new_value=r["new_value"],
+                reason=r["reason"],
+                confidence=r["confidence"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+    # ------------------------------------------------------------------
     # KV cache index
     # ------------------------------------------------------------------
 
@@ -975,7 +1244,9 @@ class Memory:
     def db_stats(self) -> dict:
         """Database size and table counts."""
         counts = {}
-        for table in ["threads", "messages", "audit_log", "scl_audit_log", "kv_cache_index", "policies", "usage_daily"]:
+        for table in ["threads", "messages", "audit_log", "scl_audit_log",
+                        "kv_cache_index", "policies", "usage_daily",
+                        "routing_feedback", "policy_mutations"]:
             row = self._conn.execute(f"SELECT COUNT(*) as cnt FROM {table}").fetchone()
             counts[table] = row["cnt"]
 

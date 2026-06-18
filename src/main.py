@@ -439,6 +439,58 @@ def cmd_scl(args):
         print("Usage: python -m src scl audit [--last N]")
 
 
+def cmd_init(args):
+    """Run Cortex as PID 1 (init replacement)."""
+    import os
+    from .daemon import DaemonServer
+    from .hardware_detect import detect_system
+
+    if os.getpid() != 1 and not args.force:
+        print("Warning: Not running as PID 1. Use --force to override.")
+        print("For dry-run: python -m src init --dry-run")
+        sys.exit(1)
+
+    profile = detect_system()
+    daemon = DaemonServer(
+        host="0.0.0.0",
+        port=args.port,
+        profile=profile,
+    )
+    import asyncio
+    asyncio.run(daemon.start())
+
+
+def cmd_feedback(args):
+    """Send routing feedback to the Cortex daemon."""
+    import urllib.request
+
+    payload = json.dumps({
+        "request_id": args.request_id or "",
+        "thread_id": args.thread_id or "",
+        "category": args.category or "",
+        "routed_tier": args.tier or "",
+        "actual_model": args.model or "",
+        "predicted_correct": 1 if args.predicted_correct else 0,
+        "user_correct": args.user_correct,
+        "tool_success": 1 if args.tool_success else 0,
+        "latency_ms": args.latency_ms or 0.0,
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{args.url}/v1/feedback",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+            print(f"Feedback recorded: {result.get('feedback_id')}")
+    except urllib.error.HTTPError as e:
+        print(f"Error: HTTP {e.code}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="cortex",
@@ -486,6 +538,25 @@ def main():
     p_smoke.add_argument("--url", default="http://localhost:11411", help="Daemon URL")
     p_smoke.add_argument("--prompt", default=None, help="Custom prompt")
 
+    # init (PID-1 mode)
+    p_init = sub.add_parser("init", help="Run Cortex as PID 1 (boot into AI-native OS)")
+    p_init.add_argument("--port", type=int, default=11411, help="Daemon port")
+    p_init.add_argument("--force", action="store_true", help="Run even if not PID 1")
+    p_init.add_argument("--dry-run", action="store_true", help="Print what would happen")
+
+    # feedback
+    p_feedback = sub.add_parser("feedback", help="Send routing feedback to daemon")
+    p_feedback.add_argument("--url", default="http://localhost:11411", help="Daemon URL")
+    p_feedback.add_argument("--request-id", help="Request ID to feedback on")
+    p_feedback.add_argument("--thread-id", help="Thread ID")
+    p_feedback.add_argument("--category", help="Task category")
+    p_feedback.add_argument("--tier", help="Routed tier")
+    p_feedback.add_argument("--model", help="Actual model used")
+    p_feedback.add_argument("--predicted-correct", action="store_true", help="We predicted success")
+    p_feedback.add_argument("--user-correct", type=int, choices=[0, 1], help="User confirms correctness")
+    p_feedback.add_argument("--tool-success", action="store_true", help="Tools executed successfully")
+    p_feedback.add_argument("--latency-ms", type=float, default=0.0, help="Request latency")
+
     # benchmark
     p_bench = sub.add_parser("benchmark", help="Benchmark TTFT")
     p_bench.add_argument("--url", default="http://localhost:8000", help="Server URL")
@@ -501,7 +572,16 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "detect":
+    if args.command == "init":
+        if args.dry_run:
+            print("[DRY-RUN] Would boot Cortex as PID 1")
+            print("  port:", args.port)
+            print("  host: 0.0.0.0")
+            sys.exit(0)
+        cmd_init(args)
+    elif args.command == "feedback":
+        cmd_feedback(args)
+    elif args.command == "detect":
         cmd_detect(args)
     elif args.command == "tiers":
         cmd_tiers(args)

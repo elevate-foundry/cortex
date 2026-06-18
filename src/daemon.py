@@ -31,6 +31,7 @@ Managed backends:
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -59,6 +60,7 @@ from .resilience import ResilienceLayer
 
 from .scl.audit import build_scl_from_response, build_scl_from_streaming_route, build_scl_from_autonomous_response
 from .braille.manifest import system_manifest
+from .policy_rewriter import PolicyRewriter
 
 
 logger = logging.getLogger("cortex")
@@ -95,8 +97,10 @@ class DaemonServer:
         self.tools = ToolRegistry()
         self.policy = PolicyEngine(self.memory)
         self.resilience = ResilienceLayer()
+        self.rewriter = PolicyRewriter(self.memory)
         self.start_time = 0.0
         self.request_count = 0
+        self._zombies_reaped = 0
 
     async def start(self):
         """Start the daemon."""
@@ -151,6 +155,12 @@ class DaemonServer:
             hot = " [HOT]" if not m["is_challenge"] and m["tier"] in ("L0","L1","L2") else ""
             print(f"  {icon} {m['tier']}: {m['model_id']}{hot}")
         print()
+
+        # PID-1 signal plumbing (SIGCHLD for zombie reaping)
+        self._setup_pid1_signals()
+
+        # Start background policy rewriter task
+        asyncio.create_task(self._policy_rewriter_task())
 
         async with server:
             await server.serve_forever()
@@ -243,6 +253,14 @@ class DaemonServer:
                 await self._handle_resilience_status(writer)
             elif path == "/v1/resilience/reset" and method == "POST":
                 await self._handle_resilience_reset(writer, body)
+            elif path == "/v1/services" and method == "GET":
+                await self._handle_services(writer)
+            elif path == "/v1/feedback" and method == "POST":
+                await self._handle_feedback(writer, body)
+            elif path == "/v1/policy/accuracy" and method == "GET":
+                await self._handle_policy_accuracy(writer)
+            elif path == "/v1/policy/mutations" and method == "GET":
+                await self._handle_policy_mutations(writer)
             else:
                 await self._send_json(writer, 404, {
                     "error": {"message": f"Not found: {path}", "type": "invalid_request"}
@@ -483,6 +501,27 @@ class DaemonServer:
                             scl_text=scl_text,
                             fingerprint=scl_fp,
                         )
+
+                        # --- Auto routing feedback (self-modifying policy) ---
+                        try:
+                            predicted = self.rewriter.compute_predicted_correct(
+                                tool_rounds=tool_rounds,
+                                tool_success=all_rounds[-1].get("tool_success", False) if all_rounds else False,
+                                latency_ms=cortex_resp.total_ms if cortex_resp else latency_ms,
+                                tier=routed_tier,
+                            )
+                            self.memory.log_routing_feedback(
+                                request_id=formatted.get("id", ""),
+                                thread_id=thread_id,
+                                category=category,
+                                routed_tier=routed_tier,
+                                actual_model=actual_model,
+                                predicted_correct=predicted,
+                                tool_success=1 if (all_rounds and all_rounds[-1].get("tool_success")) else 0,
+                                latency_ms=cortex_resp.total_ms if cortex_resp else latency_ms,
+                            )
+                        except Exception:
+                            pass  # never fail a request due to feedback logging
                 except Exception:
                     pass  # never fail a request due to SCL
 
@@ -956,6 +995,130 @@ class DaemonServer:
         else:
             count = self.resilience.reset_all()
             await self._send_json(writer, 200, {"status": "ok", "circuits_reset": count})
+
+    # ------------------------------------------------------------------
+    # New endpoints: services, feedback, policy
+    # ------------------------------------------------------------------
+
+    async def _handle_services(self, writer):
+        """GET /v1/services — what Cortex thinks should be running."""
+        services = [
+            {
+                "name": "cortex-daemon",
+                "status": "running",
+                "pid": 1 if os.getpid() == 1 else os.getpid(),
+                "reason": "AI-native OS PID 1",
+            },
+            {
+                "name": "cortex-l0",
+                "status": "ready",
+                "model": self.cortex.manager.status().get("models", [{}])[0].get("model_id", ""),
+                "reason": "Router model loaded",
+            },
+            {
+                "name": "cortex-memory",
+                "status": "ready",
+                "db_size_mb": self.memory.db_stats().get("db_size_mb", 0),
+                "reason": "SQLite WAL active",
+            },
+            {
+                "name": "cortex-policy",
+                "status": "active",
+                "mutations": len(self.memory.get_policy_mutations(limit=1)),
+                "reason": "Self-modifying policy engine",
+            },
+        ]
+        await self._send_json(writer, 200, {
+            "object": "list",
+            "data": services,
+        })
+
+    async def _handle_feedback(self, writer, body: bytes):
+        """POST /v1/feedback — human or system feedback on routing."""
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            await self._send_json(writer, 400, {
+                "error": {"message": f"Invalid JSON: {e}", "type": "invalid_request"}
+            })
+            return
+
+        entry = self.memory.log_routing_feedback(
+            request_id=data.get("request_id", ""),
+            thread_id=data.get("thread_id", ""),
+            category=data.get("category", ""),
+            routed_tier=data.get("routed_tier", ""),
+            actual_model=data.get("actual_model", ""),
+            predicted_correct=data.get("predicted_correct", 0),
+            user_correct=data.get("user_correct"),
+            tool_success=data.get("tool_success", 0),
+            latency_ms=data.get("latency_ms", 0.0),
+        )
+        await self._send_json(writer, 200, {"status": "ok", "feedback_id": entry.id})
+
+    async def _handle_policy_accuracy(self, writer):
+        """GET /v1/policy/accuracy — routing accuracy stats."""
+        accuracy = self.memory.get_routing_accuracy(days=7)
+        await self._send_json(writer, 200, {
+            "object": "policy_accuracy",
+            "data": accuracy,
+        })
+
+    async def _handle_policy_mutations(self, writer):
+        """GET /v1/policy/mutations — recorded policy mutations."""
+        mutations = self.memory.get_policy_mutations(limit=50)
+        await self._send_json(writer, 200, {
+            "object": "list",
+            "data": [{
+                "id": m.id,
+                "tier": m.tier,
+                "field": m.field,
+                "old_value": m.old_value,
+                "new_value": m.new_value,
+                "reason": m.reason,
+                "confidence": m.confidence,
+                "created_at": m.created_at,
+            } for m in mutations],
+        })
+
+    # ------------------------------------------------------------------
+    # PID-1 signal plumbing
+    # ------------------------------------------------------------------
+
+    def _setup_pid1_signals(self):
+        """Install SIGCHLD handler for zombie reaping (PID-1 mode)."""
+        def _reap_zombies(signum, frame):
+            while True:
+                try:
+                    pid, _ = os.waitpid(-1, os.WNOHANG)
+                    if pid == 0:
+                        break
+                    self._zombies_reaped += 1
+                except ChildProcessError:
+                    break
+
+        signal.signal(signal.SIGCHLD, _reap_zombies)
+        logger.info("Installed SIGCHLD handler (zombie reaping)")
+
+    # ------------------------------------------------------------------
+    # Background tasks
+    # ------------------------------------------------------------------
+
+    async def _policy_rewriter_task(self):
+        """Background task: periodically analyze feedback and mutate policy."""
+        logger.info("Policy rewriter background task started")
+        while True:
+            await asyncio.sleep(300)  # run every 5 minutes
+            try:
+                proposals = self.rewriter.analyze_and_mutate()
+                if proposals:
+                    logger.info(
+                        "Policy rewriter: %d proposals, %d applied",
+                        len(proposals),
+                        sum(1 for p in proposals if p.should_apply),
+                    )
+            except Exception as e:
+                logger.warning("Policy rewriter error: %s", e)
 
     async def _send_json(self, writer, status: int, data):
         """Send a JSON HTTP response."""
