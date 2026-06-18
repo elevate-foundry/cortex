@@ -564,6 +564,16 @@ class DaemonServer:
                 latency_ms=latency_ms,
             )
 
+        # Update gossip state so peers see our routing decisions
+        try:
+            self.gossip.record_request({
+                "tier": routed_tier,
+                "category": category,
+                "model": actual_model,
+            })
+        except Exception:
+            pass  # never fail a request due to gossip
+
         self.memory.log_request(
             thread_id=thread_id,
             request_model=normalized.model,

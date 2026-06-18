@@ -345,6 +345,15 @@ class GossipTransport:
         """Apply a local mutation — creates a delta that will be gossiped."""
         self.local_peer.mutate(changes)
 
+    def record_request(self, route_decision: dict[str, str]) -> None:
+        """Record a routing decision in gossip state for delta propagation."""
+        self.mutate({
+            "last_route_tier": route_decision.get("tier", ""),
+            "last_route_category": route_decision.get("category", ""),
+            "last_route_model": route_decision.get("model", ""),
+            "last_route_time": str(int(time.time())),
+        })
+
     def status(self) -> dict:
         """Current gossip transport status."""
         return {
