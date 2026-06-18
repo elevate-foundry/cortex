@@ -34,6 +34,7 @@ import logging
 import signal
 import sys
 import time
+import uuid
 from typing import Optional
 
 from .hardware_detect import detect_system, SystemProfile
@@ -48,12 +49,17 @@ from .tiers import (
 from .api_adapter import (
     normalize_request,
     format_response,
+    NormalizedRequest,
 )
 from .cortex import Cortex, CortexResponse
 from .memory import Memory
 from .tools import ToolRegistry, ToolCall, PermissionRing
 from .policy import PolicyEngine, PolicyContext
 from .resilience import ResilienceLayer
+
+from .scl.audit import build_scl_from_response, build_scl_from_streaming_route, build_scl_from_autonomous_response
+from .braille.manifest import system_manifest
+
 
 logger = logging.getLogger("cortex")
 
@@ -219,6 +225,8 @@ class DaemonServer:
                 await self._handle_usage(writer, headers)
             elif path == "/v1/audit" and method == "GET":
                 await self._handle_audit(writer, headers)
+            elif path == "/v1/audit/scl" and method == "GET":
+                await self._handle_audit_scl(writer, headers)
             elif path == "/v1/memory/stats" and method == "GET":
                 await self._handle_memory_stats(writer)
             elif path == "/v1/policies" and method == "POST":
@@ -365,6 +373,18 @@ class DaemonServer:
                     })
                     return
 
+                # --- SCL audit (streaming) ---
+                try:
+                    scl_text, scl_fp = build_scl_from_streaming_route(route, model_tag, tier.name)
+                    self.memory.log_scl_audit(
+                        request_id="",
+                        thread_id=thread_id,
+                        scl_text=scl_text,
+                        fingerprint=scl_fp,
+                    )
+                except Exception:
+                    pass  # never fail a request due to SCL
+
                 # Build streaming request to the Ollama backend
                 forward_body = {
                     "model": model_tag,
@@ -404,23 +424,31 @@ class DaemonServer:
                     "error": {"message": f"Streaming error: {e}", "type": "server_error"}
                 })
         else:
-            # Non-streaming: full Cortex pipeline (route → generate → challenge → swarm)
+            # Non-streaming: full Cortex pipeline with autonomous tool loop
             try:
-                loop = asyncio.get_event_loop()
-                cortex_resp: CortexResponse = await loop.run_in_executor(
-                    None,
-                    lambda: self.cortex.process(
-                        normalized.messages,
-                        max_tokens=normalized.max_tokens,
-                    ),
+                # Auto-inject available tools if the client didn't provide any
+                if not normalized.tools:
+                    normalized.tools = self._effective_tools(policy_decision)
+
+                response_content, cortex_resp, tool_rounds, all_rounds = await self._run_tool_loop(
+                    normalized.messages,
+                    normalized,
+                    thread_id,
+                    PermissionRing(policy_decision.effective_max_ring),
                 )
 
-                response_content = cortex_resp.content
-                routed_tier = cortex_resp.tier_used.name
-                actual_model = cortex_resp.model_used
-                category = cortex_resp.route_decision.category.value
-                confidence = cortex_resp.confidence
-                escalation_path = cortex_resp.escalation_path
+                if cortex_resp is not None:
+                    routed_tier = cortex_resp.tier_used.name
+                    actual_model = cortex_resp.model_used
+                    category = cortex_resp.route_decision.category.value
+                    confidence = cortex_resp.confidence
+                    escalation_path = cortex_resp.escalation_path
+                else:
+                    routed_tier = ""
+                    actual_model = ""
+                    category = ""
+                    confidence = 0.0
+                    escalation_path = []
 
                 routing_meta = {
                     "tier": routed_tier,
@@ -428,18 +456,35 @@ class DaemonServer:
                     "confidence": confidence,
                     "backend_model": actual_model,
                     "escalation_path": escalation_path,
-                    "total_ms": round(cortex_resp.total_ms, 1),
+                    "total_ms": round(cortex_resp.total_ms, 1) if cortex_resp else 0.0,
                     "thread_id": thread_id,
+                    "tool_rounds": tool_rounds,
                 }
 
                 formatted = format_response(
-                    cortex_resp.content,
+                    response_content,
                     normalized,
                     routing_meta,
-                    cortex_resp.model_used,
-                    cortex_resp.total_ms,
+                    actual_model,
+                    cortex_resp.total_ms if cortex_resp else 0.0,
                 )
                 await self._send_json(writer, 200, formatted)
+
+                # --- SCL audit (non-streaming, includes tool rounds) ---
+                try:
+                    if cortex_resp is not None:
+                        if tool_rounds > 0:
+                            scl_text, scl_fp = build_scl_from_autonomous_response(cortex_resp, all_rounds)
+                        else:
+                            scl_text, scl_fp = build_scl_from_response(cortex_resp)
+                        self.memory.log_scl_audit(
+                            request_id=formatted.get("id", ""),
+                            thread_id=thread_id,
+                            scl_text=scl_text,
+                            fingerprint=scl_fp,
+                        )
+                except Exception:
+                    pass  # never fail a request due to SCL
 
             except Exception as e:
                 logger.error("Cortex processing error: %s", e, exc_info=True)
@@ -476,6 +521,146 @@ class DaemonServer:
             escalation_path=escalation_path,
             error=error_msg,
         )
+
+    async def _run_tool_loop(
+        self,
+        messages: list[dict],
+        normalized: NormalizedRequest,
+        thread_id: str,
+        max_ring: PermissionRing,
+        max_rounds: int = 10,
+    ) -> tuple[str, Optional[CortexResponse], int, list]:
+        """Run the generate → tool → generate autonomous loop."""
+        current_messages = list(messages)
+        final_cortex_resp: Optional[CortexResponse] = None
+        tool_rounds = 0
+        all_rounds: list = []
+
+        for _ in range(max_rounds):
+            loop = asyncio.get_event_loop()
+            cortex_resp = await loop.run_in_executor(
+                None,
+                lambda: self.cortex.process(
+                    current_messages,
+                    max_tokens=normalized.max_tokens,
+                    tools=normalized.tools,
+                ),
+            )
+            final_cortex_resp = cortex_resp
+
+            if not cortex_resp or not cortex_resp.raw_response:
+                break
+
+            content, tool_calls = self._extract_tool_response(cortex_resp.raw_response)
+            if not tool_calls:
+                break
+
+            # Execute tools
+            tool_results = await self.tools.execute_batch(tool_calls, max_ring, parallel=True)
+
+            # Build next-round messages
+            tc_meta = []
+            for tc in tool_calls:
+                tc_meta.append({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments),
+                    }
+                })
+
+            current_messages.append({
+                "role": "assistant",
+                "content": content or "",
+                "tool_calls": tc_meta,
+            })
+
+            for tc, tr in zip(tool_calls, tool_results):
+                current_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": tr.output if tr.success else f"Error: {tr.error}",
+                })
+
+            # Persist tool messages to thread memory
+            self.memory.add_message(
+                thread_id, "assistant", content or "",
+                metadata={"tool_calls": tc_meta, "model": final_cortex_resp.model_used, "tier": final_cortex_resp.tier_used.name},
+            )
+            for tc, tr in zip(tool_calls, tool_results):
+                self.memory.add_message(
+                    thread_id, "tool",
+                    tr.output if tr.success else f"Error: {tr.error}",
+                    metadata={"tool_call_id": tc.id},
+                )
+
+            all_rounds.append((tool_calls, tool_results))
+            tool_rounds += 1
+
+        return (
+            final_cortex_resp.content if final_cortex_resp else "",
+            final_cortex_resp,
+            tool_rounds,
+            all_rounds,
+        )
+
+    def _effective_tools(self, policy_decision: "PolicyDecision") -> Optional[list[dict]]:
+        """Get the tool list to send to the model based on policy."""
+        max_ring_val = getattr(policy_decision, "effective_max_ring", 1)
+        try:
+            max_ring = PermissionRing(max_ring_val)
+        except ValueError:
+            max_ring = PermissionRing.DRAFT
+        return self.tools.get_openai_tools(max_ring=max_ring)
+
+    def _extract_tool_response(self, raw: Optional[dict]) -> tuple[str, list]:
+        """Extract assistant content + tool calls from raw backend response."""
+        if not raw:
+            return "", []
+        tool_calls: list[ToolCall] = []
+        content = ""
+
+        # Ollama format
+        if "message" in raw:
+            msg = raw.get("message", {})
+            content = msg.get("content", "")
+            for tc in msg.get("tool_calls", []):
+                func = tc.get("function", {})
+                name = func.get("name", "")
+                args = func.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                tool_calls.append(ToolCall(
+                    id=f"call_{uuid.uuid4().hex[:12]}",
+                    name=name,
+                    arguments=args,
+                ))
+            return content, tool_calls
+
+        # OpenAI format
+        choice = raw.get("choices", [{}])[0]
+        msg = choice.get("message", {})
+        content = msg.get("content", "") or ""
+        for tc in msg.get("tool_calls", []):
+            func = tc.get("function", {})
+            name = func.get("name", "")
+            args = func.get("arguments", "{}")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {}
+            tool_calls.append(ToolCall(
+                id=tc.get("id", f"call_{uuid.uuid4().hex[:12]}"),
+                name=name,
+                arguments=args,
+            ))
+
+        return content, tool_calls
 
     async def _handle_models(self, writer):
         """Handle GET /v1/models — list ALL available models (loaded + discovered)."""
@@ -562,6 +747,11 @@ class DaemonServer:
             },
             "cortex": self.cortex.status(),
             "max_local_tier": max_feasible_tier(self.profile).name,
+            "semantic": {
+                "scl_records": self.memory.get_scl_stats()["record_count"],
+                "last_audit_fp": self.memory.get_scl_stats()["last_fingerprint"],
+                "system_manifest": system_manifest(self.profile),
+            },
         })
 
     # ------------------------------------------------------------------
@@ -673,6 +863,14 @@ class DaemonServer:
                 }
                 for e in entries
             ],
+        })
+
+    async def _handle_audit_scl(self, writer, headers: dict):
+        """GET /v1/audit/scl — recent SCL audit entries."""
+        entries = self.memory.get_scl_audit(limit=50)
+        await self._send_json(writer, 200, {
+            "object": "list",
+            "data": [e.to_dict() for e in entries],
         })
 
     async def _handle_memory_stats(self, writer):

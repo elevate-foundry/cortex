@@ -96,6 +96,8 @@ class Message:
         d = {"role": self.role, "content": self.content}
         if self.role == "tool" and self.metadata.get("tool_call_id"):
             d["tool_call_id"] = self.metadata["tool_call_id"]
+        if self.role == "assistant" and self.metadata.get("tool_calls"):
+            d["tool_calls"] = self.metadata["tool_calls"]
         return d
 
 
@@ -264,7 +266,39 @@ CREATE TABLE IF NOT EXISTS usage_daily (
     error_count       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (date_str, tier, model)
 );
+
+-- SCL audit log (append-only)
+CREATE TABLE IF NOT EXISTS scl_audit_log (
+    id            TEXT PRIMARY KEY,
+    request_id    TEXT NOT NULL DEFAULT '',
+    thread_id     TEXT NOT NULL DEFAULT '',
+    scl_text      TEXT NOT NULL,
+    fingerprint   TEXT NOT NULL DEFAULT '',
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scl_audit_time    ON scl_audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_scl_audit_thread  ON scl_audit_log(thread_id);
 """
+
+@dataclass
+class SCLAuditEntry:
+    """An SCL audit log entry."""
+    id: str
+    request_id: str
+    thread_id: str
+    scl_text: str
+    fingerprint: str
+    created_at: int
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "request_id": self.request_id,
+            "thread_id": self.thread_id,
+            "scl_text": self.scl_text,
+            "fingerprint": self.fingerprint,
+            "created_at": self.created_at,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +709,77 @@ class Memory:
         )
 
     # ------------------------------------------------------------------
+    # SCL audit log
+    # ------------------------------------------------------------------
+
+    def log_scl_audit(
+        self,
+        request_id: str = "",
+        thread_id: str = "",
+        scl_text: str = "",
+        fingerprint: str = "",
+    ) -> SCLAuditEntry:
+        """Log an SCL audit entry."""
+        now = _now_ms()
+        entry = SCLAuditEntry(
+            id=_uuid(),
+            request_id=request_id,
+            thread_id=thread_id,
+            scl_text=scl_text,
+            fingerprint=fingerprint,
+            created_at=now,
+        )
+        with self._tx() as c:
+            c.execute(
+                """INSERT INTO scl_audit_log
+                   (id, request_id, thread_id, scl_text, fingerprint, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (entry.id, entry.request_id, entry.thread_id,
+                 entry.scl_text, entry.fingerprint, entry.created_at),
+            )
+        return entry
+
+    def get_scl_audit(
+        self,
+        thread_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[SCLAuditEntry]:
+        """Query the SCL audit log, most recent first."""
+        query = "SELECT * FROM scl_audit_log WHERE 1=1"
+        params: list[Any] = []
+
+        if thread_id:
+            query += " AND thread_id = ?"
+            params.append(thread_id)
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self._conn.execute(query, params).fetchall()
+        return [SCLAuditEntry(
+            id=r["id"],
+            request_id=r["request_id"],
+            thread_id=r["thread_id"],
+            scl_text=r["scl_text"],
+            fingerprint=r["fingerprint"],
+            created_at=r["created_at"],
+        ) for r in rows]
+
+    def get_scl_stats(self) -> dict:
+        """Return SCL audit statistics for the status endpoint."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM scl_audit_log"
+        ).fetchone()
+        total = row["cnt"] if row else 0
+        last = self._conn.execute(
+            "SELECT fingerprint FROM scl_audit_log ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        return {
+            "record_count": total,
+            "last_fingerprint": last["fingerprint"] if last else "",
+        }
+
+    # ------------------------------------------------------------------
     # KV cache index
     # ------------------------------------------------------------------
 
@@ -870,7 +975,7 @@ class Memory:
     def db_stats(self) -> dict:
         """Database size and table counts."""
         counts = {}
-        for table in ["threads", "messages", "audit_log", "kv_cache_index", "policies", "usage_daily"]:
+        for table in ["threads", "messages", "audit_log", "scl_audit_log", "kv_cache_index", "policies", "usage_daily"]:
             row = self._conn.execute(f"SELECT COUNT(*) as cnt FROM {table}").fetchone()
             counts[table] = row["cnt"]
 

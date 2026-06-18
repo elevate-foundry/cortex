@@ -190,7 +190,7 @@ class ModelManager:
 
         # Check VRAM budget
         if model.vram_mb > 0 and (self._vram_used_mb + model.vram_mb) > self._vram_budget_mb:
-            freed = self._evict_for_space(model.vram_mb)
+            freed = self._evict_for_space(model.vram_mb, target_tier=tier)
             if not freed:
                 logger.error(
                     f"Cannot load {model.model_id} ({model.vram_mb}MB): "
@@ -252,15 +252,18 @@ class ModelManager:
         )
         return True
 
-    def _evict_for_space(self, needed_mb: int) -> bool:
+    def _evict_for_space(self, needed_mb: int, target_tier: Optional[Tier] = None) -> bool:
         """
-        Evict on-demand models (not always-hot) to free space.
+        Evict models to free space.
+        Non-always-hot models are evicted first.
+        If still insufficient, lower-tier always-hot models may be evicted
+        so a higher-tier model can load.
         Returns True if enough space was freed.
         """
         now = time.monotonic()
         grace = self.config.eviction_grace_period_s
 
-        # Candidates: not always-hot, not recently used, sorted by last_used (oldest first)
+        # Phase 1: non-always-hot, idle models
         candidates = [
             lm for lm in self._loaded.values()
             if (lm.state == ModelState.READY
@@ -276,6 +279,23 @@ class ModelManager:
             logger.info(f"Evicting {lm.tier.name}: {lm.model.model_id} (idle {now - lm.last_used:.0f}s)")
             self.unload_model(lm.tier, lm.model)
             freed += lm.model.vram_mb
+
+        # Phase 2: evict lower-tier always-hot models to make room for higher-tier load
+        if target_tier is not None:
+            hot_candidates = [
+                lm for lm in self._loaded.values()
+                if (lm.state == ModelState.READY
+                    and TIER_SPECS[lm.tier].always_hot
+                    and lm.tier.value < target_tier.value)
+            ]
+            # Evict highest lower tier first (e.g. L2 before L1, keep L0/router alive)
+            hot_candidates.sort(key=lambda lm: (-lm.tier.value, lm.last_used))
+            for lm in hot_candidates:
+                if (self._vram_used_mb + needed_mb - freed) <= self._vram_budget_mb:
+                    return True
+                logger.info(f"Evicting always-hot {lm.tier.name}: {lm.model.model_id} for {target_tier.name} load")
+                self.unload_model(lm.tier, lm.model)
+                freed += lm.model.vram_mb
 
         return (self._vram_used_mb + needed_mb) <= self._vram_budget_mb
 

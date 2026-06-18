@@ -66,7 +66,7 @@ class CortexResponse:
     swarm_result: Optional[SwarmResult] = None
     escalation_path: list[str] = field(default_factory=list)
     total_ms: float = 0.0
-
+    raw_response: Optional[dict] = None  # full raw backend response (for tool calls)
 
 class Cortex:
     """
@@ -112,6 +112,7 @@ class Cortex:
         self,
         messages: list[dict],
         max_tokens: int = 512,
+        tools: Optional[list[dict]] = None,
     ) -> CortexResponse:
         """
         Process a user request through the full pipeline.
@@ -143,10 +144,10 @@ class Cortex:
         escalation_path.append(f"route→{tier.name}(conf={route.confidence:.2f})")
 
         # --- Step 2: Generate with core model ---
-        core_response = self._generate(messages, tier, gen_tokens)
+        core_response = self._generate(messages, tier, gen_tokens, tools=tools)
         if core_response is None:
             # Escalate if core model failed
-            tier, core_response = self._escalate_generate(messages, tier, max_tokens)
+            tier, core_response = self._escalate_generate(messages, tier, max_tokens, tools=tools)
             escalation_path.append(f"escalate→{tier.name}")
 
         if core_response is None:
@@ -220,6 +221,7 @@ class Cortex:
             swarm_result=swarm_result,
             escalation_path=escalation_path,
             total_ms=total_ms,
+            raw_response=core_response.raw,
         )
 
         # Self-audit: log routing decision to Memory if available
@@ -284,17 +286,22 @@ class Cortex:
         messages: list[dict],
         tier: Tier,
         max_tokens: int,
+        tools: Optional[list[dict]] = None,
     ) -> Optional[CompletionResponse]:
         """Generate a response using the core model at a tier."""
         adapter = self.manager.get_adapter(tier)
         if adapter is None:
-            # Try to load the model on-demand
+            # Try to load any model in this tier on-demand
             from .tiers import get_models_for_tier
             models = get_models_for_tier(tier, self.profile)
-            if models:
-                loaded = self.manager.load_model(tier, models[0])
-                if loaded and loaded.state == ModelState.READY:
-                    adapter = loaded.adapter
+            for m in models:
+                try:
+                    loaded = self.manager.load_model(tier, m)
+                    if loaded and loaded.state == ModelState.READY:
+                        adapter = loaded.adapter
+                        break
+                except Exception:
+                    continue
 
         if adapter is None:
             return None
@@ -316,6 +323,7 @@ class Cortex:
             max_tokens=max_tokens,
             temperature=0.0,
             extra=extra,
+            tools=tools,
         )
 
         try:
@@ -329,11 +337,12 @@ class Cortex:
         messages: list[dict],
         current_tier: Tier,
         max_tokens: int,
+        tools: Optional[list[dict]] = None,
     ) -> tuple[Tier, Optional[CompletionResponse]]:
         """Try higher tiers until one works."""
         for tier_val in range(current_tier + 1, min(self._max_tier + 1, Tier.L7 + 1)):
             tier = Tier(tier_val)
-            resp = self._generate(messages, tier, max_tokens)
+            resp = self._generate(messages, tier, max_tokens, tools=tools)
             if resp is not None:
                 return tier, resp
         return current_tier, None
@@ -368,10 +377,14 @@ class Cortex:
         if adapter is None:
             from .tiers import get_models_for_tier
             models = get_models_for_tier(tier, self.profile)
-            if models:
-                loaded = self.manager.load_model(tier, models[0])
-                if loaded and loaded.state == ModelState.READY:
-                    adapter = loaded.adapter
+            for m in models:
+                try:
+                    loaded = self.manager.load_model(tier, m)
+                    if loaded and loaded.state == ModelState.READY:
+                        adapter = loaded.adapter
+                        break
+                except Exception:
+                    continue
 
         # Fall back to any available tier
         if adapter is None:

@@ -51,6 +51,7 @@ class CompletionRequest:
     temperature: float = 0.0
     stream: bool = False
     stop: Optional[list[str]] = None
+    tools: Optional[list[dict]] = None  # OpenAI function-calling format
     extra: dict = field(default_factory=dict)
 
 
@@ -108,9 +109,7 @@ class BackendAdapter:
         return h
 
     def _completions_url(self) -> str:
-        if self.backend == BackendType.OLLAMA:
-            return f"{self.base_url}/api/chat"
-        # vLLM, llama.cpp, OpenAI all use /v1/chat/completions
+        # All backends speak OpenAI-compatible /v1/chat/completions
         return f"{self.base_url}/v1/chat/completions"
 
     def _models_url(self) -> str:
@@ -129,31 +128,19 @@ class BackendAdapter:
         model = req.model or self.default_model
         t0 = time.monotonic()
 
-        if self.backend == BackendType.OLLAMA:
-            payload = {
-                "model": model,
-                "messages": req.messages,
-                "stream": False,
-                "options": {
-                    "temperature": req.temperature,
-                    "num_predict": req.max_tokens,
-                },
-            }
-            if req.stop:
-                payload["options"]["stop"] = req.stop
-            # Forward extra Ollama-specific fields (keep_alive, etc.)
-            if req.extra.get("keep_alive"):
-                payload["keep_alive"] = req.extra["keep_alive"]
-        else:
-            payload = {
-                "model": model,
-                "messages": req.messages,
-                "max_tokens": req.max_tokens,
-                "temperature": req.temperature,
-                "stream": False,
-            }
-            if req.stop:
-                payload["stop"] = req.stop
+        payload = {
+            "model": model,
+            "messages": req.messages,
+            "max_tokens": req.max_tokens,
+            "temperature": req.temperature,
+            "stream": False,
+        }
+        if req.stop:
+            payload["stop"] = req.stop
+        if req.tools:
+            payload["tools"] = req.tools
+        if req.extra.get("keep_alive"):
+            payload["keep_alive"] = req.extra["keep_alive"]
 
         url = self._completions_url()
         data = json.dumps(payload).encode()
@@ -179,28 +166,20 @@ class BackendAdapter:
 
         total_ms = (time.monotonic() - t0) * 1000
 
-        # Parse response — Ollama vs OpenAI format
-        if self.backend == BackendType.OLLAMA:
-            msg = body.get("message", {})
-            content = msg.get("content", "")
-            # Qwen3 thinking models: content may be empty while thinking is populated
-            if not content.strip():
-                thinking = msg.get("thinking", "") or msg.get("reasoning", "")
-                if thinking:
-                    content = thinking
-            resp_model = body.get("model", model)
-            finish = body.get("done_reason", "stop")
-        else:
-            choice = body.get("choices", [{}])[0]
-            msg = choice.get("message", {})
-            content = msg.get("content", "")
-            # OpenAI-compat endpoint may have reasoning field for thinking models
-            if not content.strip():
-                reasoning = msg.get("reasoning", "") or msg.get("thinking", "")
-                if reasoning:
-                    content = reasoning
-            resp_model = body.get("model", model)
-            finish = choice.get("finish_reason", "")
+        # Parse response — unified OpenAI-compatible format (all backends)
+        choice = body.get("choices", [{}])[0]
+        msg = choice.get("message", {})
+        content = msg.get("content", "")
+        if not content.strip():
+            reasoning = msg.get("reasoning", "") or msg.get("thinking", "")
+            if reasoning:
+                content = reasoning
+            else:
+                refusal = msg.get("refusal", "")
+                if refusal:
+                    content = f"Refusal: {refusal}"
+        resp_model = body.get("model", model)
+        finish = msg.get("finish_reason", choice.get("finish_reason", "stop"))
 
         return CompletionResponse(
             content=content,
@@ -227,28 +206,17 @@ class BackendAdapter:
         model = req.model or self.default_model
         t0 = time.monotonic()
 
-        if self.backend == BackendType.OLLAMA:
-            payload = {
-                "model": model,
-                "messages": req.messages,
-                "stream": False,
-                "options": {
-                    "temperature": req.temperature,
-                    "num_predict": req.max_tokens,
-                },
-            }
-            if req.stop:
-                payload["options"]["stop"] = req.stop
-        else:
-            payload = {
-                "model": model,
-                "messages": req.messages,
-                "max_tokens": req.max_tokens,
-                "temperature": req.temperature,
-                "stream": False,
-            }
-            if req.stop:
-                payload["stop"] = req.stop
+        payload = {
+            "model": model,
+            "messages": req.messages,
+            "max_tokens": req.max_tokens,
+            "temperature": req.temperature,
+            "stream": False,
+        }
+        if req.stop:
+            payload["stop"] = req.stop
+        if req.tools:
+            payload["tools"] = req.tools
 
         url = self._completions_url()
         timeout = aiohttp.ClientTimeout(total=self.timeout_s)
@@ -268,15 +236,19 @@ class BackendAdapter:
 
         total_ms = (time.monotonic() - t0) * 1000
 
-        if self.backend == BackendType.OLLAMA:
-            content = body.get("message", {}).get("content", "")
-            resp_model = body.get("model", model)
-            finish = "stop"
-        else:
-            choice = body.get("choices", [{}])[0]
-            content = choice.get("message", {}).get("content", "")
-            resp_model = body.get("model", model)
-            finish = choice.get("finish_reason", "")
+        choice = body.get("choices", [{}])[0]
+        msg = choice.get("message", {})
+        content = msg.get("content", "")
+        if not content.strip():
+            reasoning = msg.get("reasoning", "") or msg.get("thinking", "")
+            if reasoning:
+                content = reasoning
+            else:
+                refusal = msg.get("refusal", "")
+                if refusal:
+                    content = f"Refusal: {refusal}"
+        resp_model = body.get("model", model)
+        finish = msg.get("finish_reason", choice.get("finish_reason", "stop"))
 
         return CompletionResponse(
             content=content,

@@ -346,7 +346,11 @@ def cmd_smoke(args):
 
     # 3. Status endpoint
     probe("Status endpoint", "GET", "/status",
-          expect_keys=["daemon", "system", "backends"])
+          expect_keys=["daemon", "system", "cortex", "semantic"])
+
+    # 3b. SCL audit endpoint
+    probe("SCL audit endpoint", "GET", "/v1/audit/scl",
+          expect_keys=["object", "data"])
 
     # 4. API compatibility — minimal ping
     probe("Chat completion (ping)", "POST", "/v1/chat/completions",
@@ -419,6 +423,22 @@ def cmd_smoke(args):
     sys.exit(1 if failed else 0)
 
 
+def cmd_scl(args):
+    """SCL operations."""
+    if args.scl_command == "audit":
+        from .memory import Memory
+        mem = Memory()
+        entries = mem.get_scl_audit(limit=args.last)
+        print(f"{'Last':<6} {'Fingerprint':<10} {'Created':<18} SCL")
+        print("-" * 60)
+        for e in entries:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e.created_at / 1000))
+            preview = e.scl_text.replace("\n", " | ")[:80]
+            print(f"{e.fingerprint or '⣿⣿⣿⣿':<6} {ts:<18} {preview}")
+    else:
+        print("Usage: python -m src scl audit [--last N]")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="cortex",
@@ -473,6 +493,12 @@ def main():
     p_bench.add_argument("--prompt", default="Hello, how are you?", help="Test prompt")
     p_bench.add_argument("--model", default=None, help="Model name for API")
 
+    # scl
+    p_scl = sub.add_parser("scl", help="SCL operations")
+    scl_sub = p_scl.add_subparsers(dest="scl_command", help="SCL subcommand")
+    p_scl_audit = scl_sub.add_parser("audit", help="Show SCL audit trail")
+    p_scl_audit.add_argument("--last", type=int, default=20, help="Number of entries to show")
+
     args = parser.parse_args()
 
     if args.command == "detect":
@@ -493,6 +519,8 @@ def main():
         cmd_serve(args)
     elif args.command == "smoke":
         cmd_smoke(args)
+    elif args.command == "scl":
+        cmd_scl(args)
     elif args.command == "benchmark":
         cmd_benchmark(args)
     else:
