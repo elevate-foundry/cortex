@@ -89,11 +89,12 @@ class DaemonServer:
         host: str = "127.0.0.1",
         port: int = 11411,
         profile: Optional[SystemProfile] = None,
+        db_path: Optional[str] = None,
     ):
         self.host = host
         self.port = port
         self.profile = profile or detect_system()
-        self.memory = Memory()
+        self.memory = Memory(db_path=db_path)
         self.cortex = Cortex(profile=self.profile, memory=self.memory)
         self.tools = ToolRegistry()
         self.policy = PolicyEngine(self.memory)
@@ -1230,6 +1231,7 @@ def run_daemon(
     host: str = "127.0.0.1",
     port: int = 11411,
     profile: Optional[SystemProfile] = None,
+    db_path: Optional[str] = None,
 ):
     """Start the Cortex daemon."""
     logging.basicConfig(
@@ -1238,7 +1240,7 @@ def run_daemon(
         datefmt="%H:%M:%S",
     )
 
-    daemon = DaemonServer(host=host, port=port, profile=profile)
+    daemon = DaemonServer(host=host, port=port, profile=profile, db_path=db_path)
 
     loop = asyncio.new_event_loop()
 

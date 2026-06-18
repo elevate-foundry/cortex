@@ -559,7 +559,7 @@ def main():
 
     # gossip
     p_gossip = sub.add_parser("gossip", help="Multi-host gossip protocol")
-    gossip_sub = p_gossip.add_subparsers(dest="gossip_command", help="Gossip subcommand")
+    gossip_sub = p_gossip.add_subparsers(dest="gossip_command", help="Gossip subcommand", required=True)
     p_gossip_add = gossip_sub.add_parser("add", help="Add a gossip peer")
     p_gossip_add.add_argument("--id", required=True, help="Peer node ID")
     p_gossip_add.add_argument("--url", required=True, help="Peer URL (http://host:port)")

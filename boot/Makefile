@@ -17,7 +17,7 @@ initramfs: $(BUILD_DIR)/initramfs.cpio.gz
 $(BUILD_DIR)/initramfs.cpio.gz:
 	@echo "[*] Building initramfs..."
 	@mkdir -p $(BUILD_DIR)
-	@bash $(BOOT_DIR)/alpine-init.sh
+	@python3 $(BOOT_DIR)/build-initramfs.py
 
 # ---------------------------------------------------------------------------
 # Build bootable ISO (requires grub2-mkrescue or xorriso)

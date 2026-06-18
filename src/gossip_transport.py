@@ -268,6 +268,7 @@ class GossipTransport:
             self._last_sync[peer_id] = time.monotonic()
             latency = (time.monotonic() - t0) * 1000
             self.local_peer.stats.fingerprint_hits += 1
+            self.local_peer.stats.rounds += 1
             return {"peer": peer_id, "status": "in_sync", "latency_ms": round(latency, 1)}
 
         # Step 2: Receive deltas from peer
@@ -305,6 +306,8 @@ class GossipTransport:
 
         self._last_sync[peer_id] = time.monotonic()
         latency = (time.monotonic() - t0) * 1000
+        self.local_peer.stats.fingerprint_misses += 1
+        self.local_peer.stats.rounds += 1
         return {
             "peer": peer_id,
             "status": "synced",
