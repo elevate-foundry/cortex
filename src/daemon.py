@@ -61,6 +61,7 @@ from .resilience import ResilienceLayer
 from .scl.audit import build_scl_from_response, build_scl_from_streaming_route, build_scl_from_autonomous_response
 from .braille.manifest import system_manifest
 from .policy_rewriter import PolicyRewriter
+from .gossip_transport import GossipTransport
 
 
 logger = logging.getLogger("cortex")
@@ -98,6 +99,12 @@ class DaemonServer:
         self.policy = PolicyEngine(self.memory)
         self.resilience = ResilienceLayer()
         self.rewriter = PolicyRewriter(self.memory)
+        self.gossip = GossipTransport(
+            memory=self.memory,
+            node_id=f"cortex-{port}",
+            listen_host=host,
+            listen_port=port,
+        )
         self.start_time = 0.0
         self.request_count = 0
         self._zombies_reaped = 0
@@ -161,6 +168,9 @@ class DaemonServer:
 
         # Start background policy rewriter task
         asyncio.create_task(self._policy_rewriter_task())
+
+        # Start gossip transport background task
+        asyncio.create_task(self.gossip.gossip_task())
 
         async with server:
             await server.serve_forever()
@@ -261,6 +271,16 @@ class DaemonServer:
                 await self._handle_policy_accuracy(writer)
             elif path == "/v1/policy/mutations" and method == "GET":
                 await self._handle_policy_mutations(writer)
+            elif path == "/v1/gossip" and method == "POST":
+                await self._handle_gossip(writer, body)
+            elif path == "/v1/gossip/peers" and method == "GET":
+                await self._handle_gossip_peers(writer)
+            elif path == "/v1/gossip/peers" and method == "POST":
+                await self._handle_gossip_add_peer(writer, body)
+            elif path == "/v1/gossip/state" and method == "GET":
+                await self._handle_gossip_state(writer)
+            elif path == "/v1/gossip/stats" and method == "GET":
+                await self._handle_gossip_stats(writer)
             else:
                 await self._send_json(writer, 404, {
                     "error": {"message": f"Not found: {path}", "type": "invalid_request"}
@@ -1080,6 +1100,61 @@ class DaemonServer:
                 "created_at": m.created_at,
             } for m in mutations],
         })
+
+    # ------------------------------------------------------------------
+    # Gossip endpoints
+    # ------------------------------------------------------------------
+
+    async def _handle_gossip(self, writer, body: bytes):
+        """POST /v1/gossip — receive a gossip message from a remote peer."""
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            await self._send_json(writer, 400, {
+                "error": {"message": f"Invalid JSON: {e}", "type": "invalid_request"}
+            })
+            return
+        response = await self.gossip.handle_gossip_message(data)
+        await self._send_json(writer, 200, response)
+
+    async def _handle_gossip_peers(self, writer):
+        """GET /v1/gossip/peers — list known gossip peers."""
+        await self._send_json(writer, 200, {
+            "object": "list",
+            "data": self.gossip.list_peers(),
+        })
+
+    async def _handle_gossip_add_peer(self, writer, body: bytes):
+        """POST /v1/gossip/peers — register a new gossip peer."""
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            await self._send_json(writer, 400, {
+                "error": {"message": f"Invalid JSON: {e}", "type": "invalid_request"}
+            })
+            return
+        peer_id = data.get("id", "")
+        peer_url = data.get("url", "")
+        if not peer_id or not peer_url:
+            await self._send_json(writer, 400, {
+                "error": {"message": "Missing 'id' or 'url'", "type": "invalid_request"}
+            })
+            return
+        self.gossip.add_peer(peer_id, peer_url)
+        await self._send_json(writer, 200, {"status": "ok", "peer_id": peer_id})
+
+    async def _handle_gossip_state(self, writer):
+        """GET /v1/gossip/state — current Braille fingerprint of local state."""
+        await self._send_json(writer, 200, {
+            "node_id": self.gossip.node_id,
+            "fingerprint": self.gossip.local_peer.state_fingerprint(),
+            "state_keys": len(self.gossip.local_peer.state.entries),
+            "stream_length": self.gossip.local_peer.stream.length,
+        })
+
+    async def _handle_gossip_stats(self, writer):
+        """GET /v1/gossip/stats — gossip transport statistics."""
+        await self._send_json(writer, 200, self.gossip.status())
 
     # ------------------------------------------------------------------
     # PID-1 signal plumbing

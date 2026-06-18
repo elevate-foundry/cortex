@@ -557,6 +557,20 @@ def main():
     p_feedback.add_argument("--tool-success", action="store_true", help="Tools executed successfully")
     p_feedback.add_argument("--latency-ms", type=float, default=0.0, help="Request latency")
 
+    # gossip
+    p_gossip = sub.add_parser("gossip", help="Multi-host gossip protocol")
+    gossip_sub = p_gossip.add_subparsers(dest="gossip_command", help="Gossip subcommand")
+    p_gossip_add = gossip_sub.add_parser("add", help="Add a gossip peer")
+    p_gossip_add.add_argument("--id", required=True, help="Peer node ID")
+    p_gossip_add.add_argument("--url", required=True, help="Peer URL (http://host:port)")
+    p_gossip_add.add_argument("--daemon-url", default="http://localhost:11411", help="Cortex daemon URL")
+    p_gossip_list = gossip_sub.add_parser("list", help="List gossip peers")
+    p_gossip_list.add_argument("--daemon-url", default="http://localhost:11411", help="Cortex daemon URL")
+    p_gossip_state = gossip_sub.add_parser("state", help="Show local gossip state (fingerprint)")
+    p_gossip_state.add_argument("--daemon-url", default="http://localhost:11411", help="Cortex daemon URL")
+    p_gossip_stats = gossip_sub.add_parser("stats", help="Show gossip statistics")
+    p_gossip_stats.add_argument("--daemon-url", default="http://localhost:11411", help="Cortex daemon URL")
+
     # benchmark
     p_bench = sub.add_parser("benchmark", help="Benchmark TTFT")
     p_bench.add_argument("--url", default="http://localhost:8000", help="Server URL")
@@ -572,6 +586,60 @@ def main():
 
     args = parser.parse_args()
 
+def cmd_gossip(args):
+    """Gossip CLI commands."""
+    import urllib.request
+
+    if args.gossip_command == "add":
+        payload = json.dumps({"id": args.id, "url": args.url}).encode()
+        req = urllib.request.Request(
+            f"{args.daemon_url}/v1/gossip/peers",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read())
+                print(f"Peer added: {result.get('peer_id')}")
+        except Exception as e:
+            print(f"Error: {e}")
+
+    elif args.gossip_command == "list":
+        req = urllib.request.Request(f"{args.daemon_url}/v1/gossip/peers")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read())
+                peers = result.get("data", [])
+                print(f"Known peers: {len(peers)}")
+                for p in peers:
+                    print(f"  {p['id']:<20s} {p['url']:<30s} last_sync={p.get('last_sync_seconds_ago', '?')}s")
+        except Exception as e:
+            print(f"Error: {e}")
+
+    elif args.gossip_command == "state":
+        req = urllib.request.Request(f"{args.daemon_url}/v1/gossip/state")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read())
+                print(f"Node:      {result['node_id']}")
+                print(f"Fingerprint: {result['fingerprint']}")
+                print(f"State keys:  {result['state_keys']}")
+                print(f"Stream:      {result['stream_length']} deltas")
+        except Exception as e:
+            print(f"Error: {e}")
+
+    elif args.gossip_command == "stats":
+        req = urllib.request.Request(f"{args.daemon_url}/v1/gossip/stats")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read())
+                print(json.dumps(result, indent=2))
+        except Exception as e:
+            print(f"Error: {e}")
+    else:
+        print("Usage: python -m src gossip {add|list|state|stats} ...")
+
+
     if args.command == "init":
         if args.dry_run:
             print("[DRY-RUN] Would boot Cortex as PID 1")
@@ -581,6 +649,8 @@ def main():
         cmd_init(args)
     elif args.command == "feedback":
         cmd_feedback(args)
+    elif args.command == "gossip":
+        cmd_gossip(args)
     elif args.command == "detect":
         cmd_detect(args)
     elif args.command == "tiers":
