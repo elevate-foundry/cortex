@@ -207,6 +207,45 @@ def detect_hardware() -> dict:
     return profile
 
 
+def mount_cortex_partition() -> str | None:
+    """Find and mount the CORTEX USB partition for persistence. Returns mount point or None."""
+    try:
+        result = subprocess.run(
+            ["blkid", "-L", "CORTEX"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            dev = result.stdout.strip()
+            os.makedirs("/mnt/cortex", exist_ok=True)
+            subprocess.run(
+                ["mount", "-t", "ext4", dev, "/mnt/cortex"],
+                capture_output=True, timeout=10, check=False
+            )
+            if os.path.ismount("/mnt/cortex"):
+                logger.info("Mounted CORTEX partition at /mnt/cortex (%s)", dev)
+                # Ensure state directories exist
+                Path("/mnt/cortex/var/lib").mkdir(parents=True, exist_ok=True)
+                Path("/mnt/cortex/var/log").mkdir(parents=True, exist_ok=True)
+                return "/mnt/cortex"
+    except FileNotFoundError:
+        logger.warning("blkid not found; cannot search for CORTEX partition")
+    except Exception as e:
+        logger.warning("Failed to mount CORTEX partition: %s", e)
+    return None
+
+
+def wait_for_port(host: str, port: int, timeout: int = 30) -> bool:
+    """Wait for a TCP port to become reachable."""
+    import socket
+    for _ in range(timeout):
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return True
+        except (socket.timeout, ConnectionRefusedError, OSError):
+            time.sleep(1)
+    return False
+
+
 def boot_sequence(dry_run: bool = False):
     """Full boot sequence for Cortex as PID 1."""
     logger.info("=== Cortex Init Boot Sequence ===")
@@ -226,6 +265,15 @@ def boot_sequence(dry_run: bool = False):
     # 3. Hardware detection
     hw = detect_hardware()
     logger.info("Hardware: %s", hw)
+
+    # 3.5 Mount CORTEX partition for persistence (optional)
+    cortex_mount = mount_cortex_partition()
+    if cortex_mount:
+        os.environ["CORTEX_DB"] = f"{cortex_mount}/var/lib/cortex.db"
+        os.environ["CORTEX_AGENTS"] = f"{cortex_mount}/AGENTS.md"
+        logger.info("Persistence enabled: DB at %s/var/lib/cortex.db", cortex_mount)
+    else:
+        logger.info("No CORTEX partition found; running without persistence")
 
     # 4. Register services based on hardware
     # getty on tty1 if we have a tty
@@ -252,6 +300,25 @@ def boot_sequence(dry_run: bool = False):
     else:
         logger.info("No network; skipping sshd")
 
+    # 4.5 Start Ollama server (required for Cortex inference)
+    ollama_path = "/usr/local/bin/ollama"
+    if Path(ollama_path).exists():
+        register_service(
+            "ollama",
+            cmd=[ollama_path, "serve"],
+            env={"OLLAMA_HOST": "127.0.0.1:11434", "HOME": "/root"},
+        )
+        if not dry_run:
+            pid = start_service("ollama")
+            if pid:
+                logger.info("Waiting for Ollama to be ready...")
+                if wait_for_port("127.0.0.1", 11434, timeout=60):
+                    logger.info("Ollama is ready")
+                else:
+                    logger.warning("Ollama did not become ready within 60s")
+    else:
+        logger.warning("Ollama not found at %s; inference will not work", ollama_path)
+
     # 5. Start Cortex daemon (this process becomes the daemon)
     logger.info("Handing over to Cortex daemon...")
     if dry_run:
@@ -261,18 +328,18 @@ def boot_sequence(dry_run: bool = False):
     # Import and start daemon inline (same process, becomes asyncio)
     sys.path.insert(0, "/app")
     try:
-        from src.daemon import DaemonServer
+        from src.daemon import DaemonServer, run_daemon
         from src.hardware_detect import detect_system
 
         profile = detect_system()
-        daemon = DaemonServer(
-            host="0.0.0.0",  # bind all interfaces in init mode
+        db_path = os.environ.get("CORTEX_DB", "/tmp/cortex.db")
+        logger.info("Cortex DB path: %s", db_path)
+        asyncio.run(run_daemon(
+            host="0.0.0.0",
             port=11411,
             profile=profile,
-        )
-
-        # asyncio run
-        asyncio.run(daemon.start())
+            db_path=db_path,
+        ))
     except Exception as e:
         logger.exception("Cortex daemon failed: %s", e)
         # Fallback: keep init alive so we can debug

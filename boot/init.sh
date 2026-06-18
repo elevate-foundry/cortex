@@ -32,19 +32,19 @@ export CORTEX_BOOT=1
 export CORTEX_INITRAMFS=1
 
 # If we have a persistent overlay (e.g. thumbdrive partition), mount it
-if [ -b /dev/sda2 ]; then
-    mkdir -p /mnt/persist
-    mount /dev/sda2 /mnt/persist 2>/dev/null || true
+PERSIST_DEV=$(blkid -L CORTEX 2>/dev/null || true)
+if [ -n "$PERSIST_DEV" ] && [ -b "$PERSIST_DEV" ]; then
+    mkdir -p /mnt/cortex
+    mount -t ext4 "$PERSIST_DEV" /mnt/cortex 2>/dev/null || true
 fi
 
-# If cortex source is present (embedded in initramfs or on persist partition),
-# exec into it. Otherwise fall back to a minimal shell for rescue.
-if [ -f /app/src/__main__.py ]; then
+# Exec into the Cortex init script (Python PID 1)
+if [ -f /app/cortex-init.py ]; then
     cd /app
-    exec python3 -m src init
-elif [ -f /mnt/persist/cortex/src/__main__.py ]; then
-    cd /mnt/persist/cortex
-    exec python3 -m src init
+    exec python3 /app/cortex-init.py
+elif [ -f /mnt/cortex/app/cortex-init.py ]; then
+    cd /mnt/cortex/app
+    exec python3 /mnt/cortex/app/cortex-init.py
 else
     echo "Cortex not found. Dropping to rescue shell."
     exec /bin/sh

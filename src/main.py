@@ -442,7 +442,7 @@ def cmd_scl(args):
 def cmd_init(args):
     """Run Cortex as PID 1 (init replacement)."""
     import os
-    from .daemon import DaemonServer
+    from .daemon import run_daemon
     from .hardware_detect import detect_system
 
     if os.getpid() != 1 and not args.force:
@@ -450,14 +450,21 @@ def cmd_init(args):
         print("For dry-run: python -m src init --dry-run")
         sys.exit(1)
 
+    if args.dry_run:
+        print("[DRY-RUN] Would boot Cortex as PID 1")
+        print(f"  port: {args.port}")
+        print(f"  host: 0.0.0.0")
+        sys.exit(0)
+
     profile = detect_system()
-    daemon = DaemonServer(
+    db_path = os.environ.get("CORTEX_DB", "/tmp/cortex.db")
+    asyncio.run(run_daemon(
         host="0.0.0.0",
         port=args.port,
         profile=profile,
-    )
-    import asyncio
-    asyncio.run(daemon.start())
+        db_path=db_path,
+    ))
+
 
 
 def cmd_feedback(args):
@@ -638,43 +645,6 @@ def cmd_gossip(args):
             print(f"Error: {e}")
     else:
         print("Usage: python -m src gossip {add|list|state|stats} ...")
-
-
-    if args.command == "init":
-        if args.dry_run:
-            print("[DRY-RUN] Would boot Cortex as PID 1")
-            print("  port:", args.port)
-            print("  host: 0.0.0.0")
-            sys.exit(0)
-        cmd_init(args)
-    elif args.command == "feedback":
-        cmd_feedback(args)
-    elif args.command == "gossip":
-        cmd_gossip(args)
-    elif args.command == "detect":
-        cmd_detect(args)
-    elif args.command == "tiers":
-        cmd_tiers(args)
-    elif args.command == "route":
-        cmd_route(args)
-    elif args.command == "simulate-all":
-        cmd_simulate_all(args)
-    elif args.command == "models":
-        cmd_models(args)
-    elif args.command == "daemon":
-        from .daemon import run_daemon
-        profile = _get_profile(args)
-        run_daemon(host=args.host, port=args.port, profile=profile)
-    elif args.command == "serve":
-        cmd_serve(args)
-    elif args.command == "smoke":
-        cmd_smoke(args)
-    elif args.command == "scl":
-        cmd_scl(args)
-    elif args.command == "benchmark":
-        cmd_benchmark(args)
-    else:
-        parser.print_help()
 
 
 if __name__ == "__main__":

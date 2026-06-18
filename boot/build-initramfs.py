@@ -11,7 +11,9 @@ This script creates a minimal Linux initramfs containing:
 Produces: build/initramfs.cpio.gz
 """
 
+import argparse
 import gzip
+import json
 import os
 import shutil
 import stat
@@ -185,6 +187,17 @@ def step_copy_binaries():
             dst = INITRAMFS_DIR / src.relative_to("/")
             copy_file(src, dst)
 
+    # Also copy real mount/umount/blkid (busybox versions are limited)
+    for real_bin in ["/bin/mount", "/bin/umount", "/sbin/blkid", "/usr/local/bin/ollama"]:
+        src = Path(real_bin)
+        if src.exists():
+            dst = INITRAMFS_DIR / src.relative_to("/")
+            copy_file(src, dst)
+            if real_bin == "/usr/local/bin/ollama":
+                # Copy shared libs for Ollama
+                for lib in ldd_libs(src):
+                    dst_lib = INITRAMFS_DIR / lib.relative_to("/")
+                    copy_file(lib, dst_lib)
     # busybox symlinks
     busybox = INITRAMFS_DIR / "bin" / "busybox"
     if busybox.exists():
@@ -281,7 +294,52 @@ def step_kernel():
         print("    [!] Could not download kernel")
 
 
+def step_copy_ollama_models(models: list[str]):
+    """Copy Ollama model manifests and blobs into initramfs."""
+    if not models:
+        return
+    print(f"[*] Copying Ollama models: {', '.join(models)}")
+
+    search_roots = [
+        Path("/home/owner/.ollama/models"),
+        Path("/usr/share/ollama/.ollama/models"),
+    ]
+
+    for model_ref in models:
+        model_name, tag = model_ref.split(":") if ":" in model_ref else (model_ref, "latest")
+        found = False
+        for root in search_roots:
+            manifest_path = root / "manifests" / "registry.ollama.ai" / "library" / model_name / tag
+            if manifest_path.exists():
+                found = True
+                print(f"    Found manifest: {manifest_path}")
+                manifest = json.loads(manifest_path.read_text())
+                digests = [manifest["config"]["digest"]]
+                for layer in manifest.get("layers", []):
+                    digests.append(layer["digest"])
+
+                dst_manifest = INITRAMFS_DIR / "root" / ".ollama" / "models" / "manifests" / "registry.ollama.ai" / "library" / model_name / tag
+                copy_file(manifest_path, dst_manifest)
+
+                for digest in digests:
+                    blob_name = digest.replace(":", "-")
+                    blob_path = root / "blobs" / blob_name
+                    if blob_path.exists():
+                        dst_blob = INITRAMFS_DIR / "root" / ".ollama" / "models" / "blobs" / blob_name
+                        copy_file(blob_path, dst_blob)
+                    else:
+                        print(f"    [!] Blob not found: {blob_path}")
+                break
+        if not found:
+            print(f"    [!] Model manifest not found: {model_ref}")
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Build Cortex initramfs")
+    parser.add_argument("--models", default="", help="Comma-separated Ollama models to include")
+    parser.add_argument("--no-kernel", action="store_true", help="Skip kernel copy")
+    args = parser.parse_args()
+
     print("==========================================")
     print("  Cortex Initramfs Builder")
     print("==========================================")
@@ -301,8 +359,11 @@ def main():
     step_copy_binaries()
     step_embed_cortex()
     step_devices()
+    if args.models:
+        step_copy_ollama_models([m.strip() for m in args.models.split(",")])
     step_build_cpio()
-    step_kernel()
+    if not args.no_kernel:
+        step_kernel()
 
     print("")
     print("==========================================")
