@@ -164,6 +164,15 @@ class DaemonServer:
             print(f"  {icon} {m['tier']}: {m['model_id']}{hot}")
         print()
 
+        # Audio boot announcement (speech + morse code)
+        try:
+            from .notify import boot_announce
+            max_t = str(max_feasible_tier(self.profile).name)
+            n_models = len(mgr_status.get("models", []))
+            boot_announce(models_loaded=n_models, max_tier=max_t)
+        except Exception as e:
+            logger.debug("Boot announce skipped: %s", e)
+
         # PID-1 signal plumbing (SIGCHLD for zombie reaping)
         self._setup_pid1_signals()
 

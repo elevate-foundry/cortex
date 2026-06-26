@@ -24,9 +24,28 @@ At inference time:
   3. Decode output back to SCL text
   4. Validate SCL grammar
 
+The substrate is semantic-first:
+
+  SCL text  → canonical SCL AST → Braille view
+  Braille   → canonical SCL AST → SCL text
+  model     → canonical SCL AST
+
+  @scl → emit [view: text, audience: sighted_human]
+  @scl → emit [view: braille, audience: blind_human]
+  @scl → emit [view: ast, audience: model]
+  @scl → emit [view: fingerprint, audience: routing_system]
+
 The Braille encoding is transparent at every step.
-A sighted person reads the SCL. A blind person reads the Braille.
-The model reads the same data either way.
+A sighted person can read the SCL.
+A blind person can read the Braille.
+The model reads the same canonical structure either way.
+
+Two Braille modes:
+  Braille-SCL   = readable/tactile representation of the SCL record
+  Braille hash  = compact fingerprint (4-char checksum, tactile but not explanatory)
+
+Accessibility is not an afterthought.
+The protocol has multiple human-readable surfaces and one canonical machine-readable core.
 
 Requirements:
   pip install modal
@@ -459,7 +478,8 @@ def train_model(epochs: int = EPOCHS) -> dict:
     log.info("=" * 70)
     log.info(f"Run ID:       {run_id}")
     log.info(f"Base model:   {BASE_MODEL}")
-    log.info(f"Vocab note:   Model uses standard tokenizer, but data is Braille-encoded")
+    log.info(f"Vocab note:   Standard Qwen tokenizer — data is Braille-encoded (WEAK claim)")
+    log.info(f"              For native 259-token Braille vocab, use modal_train_braille_native.py")
     log.info(f"Epochs:       {epochs}")
     log.info(f"GPU:          {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
 
