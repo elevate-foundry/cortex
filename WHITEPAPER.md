@@ -1056,10 +1056,13 @@ This architecture parallels recent work in self-modifying AI:
 
 - **RouteLLM** (UC Berkeley, 2024) — trained routers that reduce cost by 85% while maintaining 95% quality. CortexRouter is a local, embedded variant of this pattern.
 - **SEAL** (NeurIPS 2025) — LLMs that generate their own finetuning data and update directives. CortexMutate implements this at the policy/config level rather than weight level.
-- **Martian** (2024, $18M raised, ~$1.3B valuation by mid-2026) — production model router that dynamically selects the optimal cloud LLM per prompt, achieving 20–97% cost reduction for 300+ enterprise customers. Martian validates that the routing layer is where value accrues. Cortex extends this thesis in three directions Martian cannot: local-first inference (nothing leaves the machine), cross-family confidence verification (no single model trusted), and gossip-mediated collective intelligence (the frontier is a swarm, not an API). The two are complementary — Cortex's L7 could use Martian as its remote fallback optimizer.
+- **OpenRouter** (2023, $173M raised, $1.3B valuation May 2026, ~$50M ARR) — unified API gateway to 200+ cloud LLM providers. One API key, every model. OpenRouter proves that the routing/gateway layer is infrastructure worth $1B+. It is to cloud LLMs what DNS is to the internet: a resolution layer.
+- **Martian** (2024, $18M raised, ~$1.3B valuation by mid-2026) — intelligent model router that predicts per-prompt performance without running models, achieving 20–97% cost reduction for 300+ enterprise customers. Martian proves that *smart* routing (not just access) commands frontier-company valuations.
+
+Together, OpenRouter and Martian represent $2.6B in validated market capitalization for cloud LLM routing alone. Neither operates locally. Neither verifies answers. Neither gossips state. Cortex extends their thesis in three directions neither can reach: local-first inference (nothing leaves the machine), cross-family confidence verification (no single model trusted), and gossip-mediated collective intelligence (the frontier is a swarm, not an API). The two are complementary — Cortex's L7 could use either as its remote fallback optimizer.
 - **Darwin Gödel Machine** (2025) — self-referential agents that edit their own source code. Cortex's policy rewriter operates on the same principle within typed safety boundaries.
 
-$1.3B proves routing is where value accrues; Cortex extends it to where Martian can't go — as PID 1 on your device. The novel contribution is the combination: a local, embedded routing model + a self-modifying policy engine + typed SCL mutations + safety gating + full audit trail, all running on a 259-token Braille vocabulary from a thumb drive.
+$2.6B in combined market cap proves routing is where value accrues; Cortex extends it to where neither can go — as PID 1 on your device. The novel contribution is the combination: a local, embedded routing model + a self-modifying policy engine + typed SCL mutations + safety gating + full audit trail, all running on a 259-token Braille vocabulary from a thumb drive.
 
 ---
 
