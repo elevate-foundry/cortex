@@ -174,8 +174,12 @@ class Peer:
         return self.stream.current_state()
 
     def state_fingerprint(self, width: int = 4) -> str:
-        """Braille fingerprint of current state."""
-        record = self.state.to_scl(self.agent_id)
+        """Braille fingerprint of current state (agent-agnostic for convergence).
+
+        Uses a canonical anchor ("_state") so that two peers with identical
+        entries produce the same fingerprint regardless of agent_id.
+        """
+        record = self.state.to_scl("_state")
         return scl_fingerprint(record, width=width)
 
     def mutate(self, changes: dict[str, str], deletes: Optional[set[str]] = None) -> Delta:
@@ -193,6 +197,9 @@ class Peer:
     def receive_delta(self, delta: Delta) -> Optional[SemanticState]:
         """Receive and apply a delta from another peer.
 
+        Uses insert_sorted to maintain canonical ordering so that all
+        peers materialize the same state regardless of arrival order.
+
         Returns new state if applied, None if delta was already seen.
         """
         # Dedup: skip if this exact mutation is already in our stream
@@ -201,7 +208,7 @@ class Peer:
         if delta_key in self._seen_deltas:
             return None
         self._seen_deltas.add(delta_key)
-        return self.stream.append(delta)
+        return self.stream.insert_sorted(delta)
 
     def own_deltas(self) -> list[Delta]:
         """Get deltas that originated from this peer."""

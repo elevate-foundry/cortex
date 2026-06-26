@@ -411,6 +411,28 @@ class DeltaStream:
         self._deltas.append(delta)
         return new_state
 
+    def insert_sorted(self, delta: Delta) -> SemanticState:
+        """Insert a delta in canonical order and recompute state.
+
+        Canonical order: (timestamp_ms, agent_id, seq). This ensures all
+        peers that receive the same set of deltas materialize the same state,
+        regardless of arrival order.
+
+        Invalidates checkpoints after the insertion point.
+        """
+        import bisect
+
+        key = (delta.timestamp_ms, delta.agent_id, delta.seq)
+        keys = [(d.timestamp_ms, d.agent_id, d.seq) for d in self._deltas]
+        pos = bisect.bisect_right(keys, key)
+        self._deltas.insert(pos, delta)
+
+        # Invalidate checkpoints after insertion point
+        self._checkpoints = {
+            k: v for k, v in self._checkpoints.items() if k <= pos
+        }
+        return self.current_state()
+
     def current_state(self) -> SemanticState:
         """Reconstruct current state: S_0 ⊕ Σ(ΔS_i)."""
         return self.state_at(len(self._deltas))
