@@ -685,6 +685,20 @@ Content-keyed deduplication ensures each unique delta is applied exactly once, r
 | 50 agents | 4 | ~200 | O(log N) |
 | N agents | O(log N) | O(N) | Epidemic |
 
+Empirically, the in-process epidemic spread fits a sub-logarithmic power law over practical swarm sizes:
+
+$$
+R(N) \approx 2.4 \cdot N^{0.13}
+$$
+
+where $R(N)$ is the number of rounds required for shared-state convergence across $N$ agents. Equivalently:
+
+$$
+R(N) \approx 2.4 \cdot \sqrt[7.6]{N}
+$$
+
+This gives approximately 15 rounds for $N = 10^6$ agents and 20 rounds for $N = 10^7$ agents, assuming parallel pairwise gossip rounds and no transport bottleneck.
+
 Convergence is detected by comparing shared-state content hashes — O(N) against a reference, not O(N²) pairwise. Each node also retains local and full fingerprints for identity, stream position, and diagnostics; those may differ even when the shared semantic state has converged. Once shared state converges, subsequent gossip rounds cost zero data transfer (fingerprint hits).
 
 **Canonical ordering guarantee:** Deltas are inserted into each peer's stream in deterministic order by `(timestamp_ms, agent_id, seq)`. This ensures all peers that receive the same set of deltas materialize identical state — regardless of network arrival order, partitioning, or gossip pairing randomness. State fingerprints are agent-agnostic (computed over entries only, not peer identity), so convergence detection works correctly across heterogeneous node IDs.
@@ -1157,14 +1171,48 @@ Time-to-first-token is the critical latency metric. Cortex optimizes TTFT throug
 
 ### 18.3 Graceful Degradation
 
-Cortex adapts to available hardware:
+Let $V$ be the available VRAM. Cortex's capability degrades smoothly:
 
-- **192 GB Apple Silicon**: all tiers L0–L6 fit concurrently
-- **24 GB NVIDIA GPU**: L0–L4 comfortably, L5 with eviction
-- **8 GB RAM, no GPU**: L0–L2 only, with L7 as fallback
-- **No backends installed**: graceful failure with clear diagnostics
+$$
+\text{capability}(V) = \begin{cases}
+\text{Full stack (L0–L6)} & V \geq 42\text{GB} \\
+\text{Strong local (L0–L5)} & V \geq 18\text{GB} \\
+\text{Standard (L0–L4)} & V \geq 9\text{GB} \\
+\text{Compact (L0–L3)} & V \geq 5\text{GB} \\
+\text{Minimal (L0–L2)} & V \geq 2.8\text{GB} \\
+\text{Reflex only (L0)} & V \geq 0.5\text{GB}
+\end{cases}
+$$
 
-The system always functions at whatever level the hardware supports, even if that is only L0–L2 — analogous to a minimal `initramfs` boot.
+| VRAM | Capability | Example Hardware |
+|------|-----------|------------------|
+| 0.5 GB | L0 reflex only | Raspberry Pi, embedded |
+| 2.8 GB | L0–L2 always-hot | 8 GB laptop, phone |
+| 9 GB | L0–L4 standard | RTX 4070, M1 Pro |
+| 18 GB | L0–L5 strong | RTX 4090, M2 Ultra |
+| 42 GB | L0–L6 full local | A6000, M4 Ultra 192GB |
+| 80 GB | L0–L6 + concurrent tiers | H100 |
+| 192 GB | Everything resident, no eviction | 8×H100 NVLink |
+
+The system always functions at whatever level the hardware supports, even if that is only L0 — analogous to a minimal `initramfs` boot. No VRAM is wasted: right-sizing means each tier only loads when needed, and the always-hot tiers (L0–L2) coexist within the smallest practical GPU budget.
+
+### 18.4 L7: From API to Collective
+
+Today, L7 is a passthrough to a remote frontier API — the "network" in the OS analogy. But the gossip protocol implies a different endgame: **L7 is every other Cortex node you can reach.**
+
+A single node's capability is bounded by its VRAM. But a *network* of Cortex nodes, each with its own local tiers, forms a distributed inference fabric:
+
+| Scale | L7 Meaning | Convergence (rounds) |
+|-------|-----------|---------------------|
+| 1 node | OpenAI/Anthropic API call | — |
+| 10 nodes | Local cluster consensus | ~3 |
+| 1,000 nodes | Datacenter swarm inference | ~8 |
+| 10⁶ nodes | Global fleet — every Cortex gossips | ~15 |
+| 10⁷ nodes | Internet-scale agent mesh | ~20 |
+
+At this scale, the frontier model is replaced by a **frontier swarm**. Instead of routing to one large remote model, Cortex fans out to N heterogeneous peers — some with H100s running L6, some with M1s at L4, some with CPUs at L2 — and uses gossip-mediated consensus to produce a verified answer. The convergence proof guarantees agreement in $O(N^{0.13})$ rounds regardless of topology.
+
+The acoustic transport extends this further: nodes without network connectivity can participate via 300-baud FSK over air. The protocol is transport-agnostic — HTTP, sound, Bluetooth, sneakernet. The frontier is not a model. The frontier is the collective.
 
 ---
 
@@ -1223,6 +1271,8 @@ The result is an inference layer that is faster (by routing to the smallest capa
 The acoustic transport pushes this further: the same shared-state Braille fingerprint that checks convergence over HTTP can check it over sound. Two air-gapped machines in the same room can gossip state through 300-baud FSK chirps — no network required. The protocol doesn't change. Only the medium does.
 
 The question is not whether AI should be integrated into the operating system. It is whether the operating system should be redesigned around AI. Cortex is an argument that it should — and that the right substrate for that redesign is one where every byte has a shape you can touch, a sound you can hear, and a delta you can gossip.
+
+The architectural endgame is this: L7 is not an API. L7 is every other Cortex node within gossip range — over HTTP, over sound, over any medium that can carry a 4-character Braille fingerprint. The frontier model is replaced by a frontier swarm. One node is a kernel. Ten nodes are a cluster. A million nodes are an organism — converging in 15 rounds, agreeing on shared state through epidemic delta propagation, each node contributing whatever capability its hardware provides. The ceiling is not a model size. The ceiling is the number of nodes that can hear each other.
 
 ---
 
