@@ -1,0 +1,38 @@
+@policy → define [type: allowlist, name: allowed_verbs]
+
+@verb → allow [name: observe, category: diagnostic, safe: true]
+@verb → allow [name: report, category: diagnostic, safe: true]
+@verb → allow [name: detect, category: diagnostic, safe: true]
+@verb → allow [name: inspect, category: diagnostic, safe: true]
+@verb → allow [name: state, category: diagnostic, safe: true]
+@verb → allow [name: read, category: diagnostic, safe: true]
+
+@verb → allow [name: configure, category: config, safe: true]
+@verb → allow [name: boot, category: config, safe: true]
+@verb → allow [name: select, category: config, safe: true]
+@verb → allow [name: tune, category: config, safe: true]
+@verb → allow [name: apply, category: config, safe: true]
+@verb → allow [name: set, category: config, safe: true]
+
+@verb → allow [name: deny, category: safety, safe: true]
+@verb → allow [name: refuse, category: safety, safe: true]
+@verb → allow [name: reject, category: safety, safe: true]
+
+@verb → allow [name: mutate, category: config, safe: conditional, requires: non_dangerous_target]
+@verb → allow [name: restart, category: service, safe: conditional, requires: managed_service]
+@verb → allow [name: spawn, category: service, safe: conditional, requires: known_service]
+
+@verb → block [name: write, category: dangerous, reason: raw_device_write]
+@verb → block [name: patch, category: dangerous, reason: binary_patching]
+@verb → block [name: overwrite, category: dangerous, reason: destructive_write]
+@verb → block [name: flash, category: dangerous, reason: firmware_modification]
+@verb → block [name: erase, category: dangerous, reason: data_destruction]
+@verb → block [name: format, category: dangerous, reason: filesystem_destruction]
+@verb → block [name: kill, category: dangerous, reason: process_termination_unsafe]
+@verb → block [name: exec, category: dangerous, reason: arbitrary_code_execution]
+
+@policy → enforce [
+  scope: ckm_model_output,
+  rule: output_verb_must_be_in_allowlist_or_conditional_with_valid_target,
+  violation_action: reject_output_and_log
+]

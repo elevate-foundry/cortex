@@ -591,7 +591,96 @@ def main():
     p_scl_audit = scl_sub.add_parser("audit", help="Show SCL audit trail")
     p_scl_audit.add_argument("--last", type=int, default=20, help="Number of entries to show")
 
+    # train — self-training loop
+    p_train = sub.add_parser("train", help="Self-training loop: train, eval, promote CKM models")
+    p_train.add_argument("--target", default="ckm", choices=["ckm"],
+                         help="Training target")
+    p_train.add_argument("--time-budget", default="10m",
+                         help="Time budget (e.g. '10m', '1h', '30s')")
+    p_train.add_argument("--model", default="auto",
+                         help="Model size (auto, ckm-1m, ckm-5m, ckm-15m, ckm-30m, ckm-60m)")
+    p_train.add_argument("--data-dir", default="/tmp/cortex-train/data",
+                         help="Directory for training data")
+    p_train.add_argument("--output-dir", default="/tmp/cortex-train/output",
+                         help="Directory for model outputs")
+    p_train.add_argument("--boot-count", type=int, default=1000)
+    p_train.add_argument("--route-count", type=int, default=2000)
+    p_train.add_argument("--regenerate-data", action="store_true")
+    p_train.add_argument("--eval", dest="eval_model", metavar="PATH",
+                         help="Evaluate an existing model instead of training")
+    p_train.add_argument("--rollback", action="store_true",
+                         help="Rollback to previous model version")
+    p_train.add_argument("--status", action="store_true",
+                         help="Show model registry status")
+
     args = parser.parse_args()
+
+    # Dispatch to command handler
+    handlers = {
+        "detect": cmd_detect,
+        "tiers": cmd_tiers,
+        "route": cmd_route,
+        "simulate-all": cmd_simulate_all,
+        "daemon": lambda a: _cmd_daemon(a),
+        "models": cmd_models,
+        "serve": cmd_serve,
+        "smoke": cmd_smoke,
+        "init": cmd_init,
+        "feedback": cmd_feedback,
+        "gossip": cmd_gossip,
+        "benchmark": cmd_benchmark,
+        "scl": cmd_scl,
+        "train": cmd_train,
+    }
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    handler = handlers.get(args.command)
+    if handler:
+        handler(args)
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+def _cmd_daemon(args):
+    """Start the daemon (wrapper to import asyncio)."""
+    import asyncio
+    from .daemon import run_daemon
+    profile = _get_profile(args)
+    run_daemon(host=args.host, port=args.port, profile=profile)
+
+
+def cmd_train(args):
+    """Dispatch the train subcommand to ckm.cli."""
+    from .ckm.cli import main as ckm_main
+
+    # Build argv for ckm.cli based on args
+    if getattr(args, "status", False):
+        argv = ["status", "--registry-dir", f"{args.output_dir}/registry"]
+    elif getattr(args, "rollback", False):
+        argv = ["rollback", "--registry-dir", f"{args.output_dir}/registry"]
+    elif getattr(args, "eval_model", None):
+        argv = ["eval", args.eval_model,
+                "--dataset-dir", f"{args.data_dir}/tokenized"]
+    else:
+        argv = [
+            "run",
+            "--target", args.target,
+            "--time-budget", args.time_budget,
+            "--model", args.model,
+            "--data-dir", args.data_dir,
+            "--output-dir", args.output_dir,
+            "--boot-count", str(args.boot_count),
+            "--route-count", str(args.route_count),
+        ]
+        if args.regenerate_data:
+            argv.append("--regenerate-data")
+
+    sys.exit(ckm_main(argv))
+
 
 def cmd_gossip(args):
     """Gossip CLI commands."""

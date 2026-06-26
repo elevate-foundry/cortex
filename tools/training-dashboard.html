@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CKM Training Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .glow { box-shadow: 0 0 20px rgba(59, 130, 246, 0.15); }
+        .pulse { animation: pulse 2s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+        #log-container { 
+            max-height: 400px; 
+            overflow-y: auto;
+            scroll-behavior: smooth;
+        }
+        #log-container::-webkit-scrollbar { width: 6px; }
+        #log-container::-webkit-scrollbar-track { background: #1e293b; }
+        #log-container::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+    </style>
+</head>
+<body class="bg-slate-950 text-white min-h-screen">
+    <div class="max-w-7xl mx-auto px-4 py-8">
+        <!-- Header -->
+        <div class="flex items-center justify-between mb-8">
+            <div>
+                <h1 class="text-2xl font-bold flex items-center gap-3">
+                    <span class="text-3xl">🧠</span>
+                    CKM Training Dashboard
+                </h1>
+                <p class="text-slate-400 mt-1 text-sm">Cortex Kernel Model — AI as PID 1</p>
+            </div>
+            <div class="flex items-center gap-4">
+                <div id="status-badge" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700">
+                    <div class="w-2 h-2 rounded-full bg-gray-500" id="status-dot"></div>
+                    <span class="text-sm text-slate-300" id="status-text">Connecting...</span>
+                </div>
+                <button onclick="startTraining()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-medium transition-colors">
+                    Run Training
+                </button>
+            </div>
+        </div>
+
+        <!-- Stats Grid -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 glow">
+                <div class="text-slate-400 text-xs uppercase tracking-wider mb-1">Step</div>
+                <div class="text-2xl font-bold mono" id="stat-step">—</div>
+                <div class="text-slate-500 text-xs mt-1" id="stat-step-total">/ —</div>
+            </div>
+            <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 glow">
+                <div class="text-slate-400 text-xs uppercase tracking-wider mb-1">Loss</div>
+                <div class="text-2xl font-bold mono" id="stat-loss">—</div>
+                <div class="text-slate-500 text-xs mt-1" id="stat-loss-delta"></div>
+            </div>
+            <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 glow">
+                <div class="text-slate-400 text-xs uppercase tracking-wider mb-1">Epoch</div>
+                <div class="text-2xl font-bold mono" id="stat-epoch">—</div>
+                <div class="text-slate-500 text-xs mt-1" id="stat-epoch-total">/ 2</div>
+            </div>
+            <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 glow">
+                <div class="text-slate-400 text-xs uppercase tracking-wider mb-1">ETA</div>
+                <div class="text-2xl font-bold mono" id="stat-eta">—</div>
+                <div class="text-slate-500 text-xs mt-1" id="stat-throughput"></div>
+            </div>
+        </div>
+
+        <!-- Progress Bar -->
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 mb-6">
+            <div class="flex justify-between text-sm mb-2">
+                <span class="text-slate-400">Training Progress</span>
+                <span class="text-slate-300 mono" id="progress-pct">0%</span>
+            </div>
+            <div class="w-full bg-slate-800 rounded-full h-3 overflow-hidden">
+                <div id="progress-bar" class="h-full bg-gradient-to-r from-blue-600 to-cyan-500 rounded-full transition-all duration-500" style="width: 0%"></div>
+            </div>
+        </div>
+
+        <!-- Charts + Config -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+            <!-- Loss Chart -->
+            <div class="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-xl p-4">
+                <h3 class="text-sm font-medium text-slate-300 mb-3">Loss Curve</h3>
+                <canvas id="loss-chart" height="200"></canvas>
+            </div>
+
+            <!-- Config Panel -->
+            <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+                <h3 class="text-sm font-medium text-slate-300 mb-3">Configuration</h3>
+                <div class="space-y-2 text-sm">
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Model</span>
+                        <span class="mono text-slate-200" id="cfg-model">Qwen2.5-0.5B</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">GPU</span>
+                        <span class="mono text-slate-200" id="cfg-gpu">A100-80GB</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Epochs</span>
+                        <span class="mono text-slate-200" id="cfg-epochs">2</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Batch Size</span>
+                        <span class="mono text-slate-200" id="cfg-batch">32</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Learning Rate</span>
+                        <span class="mono text-slate-200" id="cfg-lr">2e-4</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">LoRA Rank</span>
+                        <span class="mono text-slate-200" id="cfg-lora">32</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Attention</span>
+                        <span class="mono text-emerald-400" id="cfg-attn">Flash v2</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Precision</span>
+                        <span class="mono text-slate-200" id="cfg-prec">bf16</span>
+                    </div>
+                    <hr class="border-slate-700 my-2">
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Est. Cost</span>
+                        <span class="mono text-emerald-400" id="cfg-cost">~$0.43</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Est. Time</span>
+                        <span class="mono text-emerald-400" id="cfg-time">~5-7 min</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Log Output -->
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+            <div class="flex justify-between items-center mb-3">
+                <h3 class="text-sm font-medium text-slate-300">Training Log</h3>
+                <button onclick="clearLog()" class="text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear</button>
+            </div>
+            <div id="log-container" class="bg-slate-950 rounded-lg p-3 mono text-xs leading-relaxed text-slate-300">
+                <div class="text-slate-500">Waiting for training to start...</div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="mt-6 text-center text-slate-600 text-xs">
+            <p>CKM v2 — Cortex Kernel Model with fixed stop tokens</p>
+            <p class="mt-1">Pipeline: probe → parse → classify_intent → validate → emit_config</p>
+        </div>
+    </div>
+
+    <script>
+        // --- State ---
+        let lossData = [];
+        let stepData = [];
+        let startTime = null;
+        let totalSteps = 0;
+        let pollInterval = null;
+
+        // --- Chart Setup ---
+        const ctx = document.getElementById('loss-chart').getContext('2d');
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: stepData,
+                datasets: [{
+                    label: 'Training Loss',
+                    data: lossData,
+                    borderColor: 'rgb(59, 130, 246)',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: true,
+                    tension: 0.3,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: {
+                        grid: { color: 'rgba(71, 85, 105, 0.3)' },
+                        ticks: { color: '#64748b', font: { family: 'JetBrains Mono', size: 10 } },
+                        title: { display: true, text: 'Step', color: '#64748b' }
+                    },
+                    y: {
+                        grid: { color: 'rgba(71, 85, 105, 0.3)' },
+                        ticks: { color: '#64748b', font: { family: 'JetBrains Mono', size: 10 } },
+                        title: { display: true, text: 'Loss', color: '#64748b' }
+                    }
+                }
+            }
+        });
+
+        // --- API Polling ---
+        const API_BASE = 'http://127.0.0.1:8091';
+
+        async function pollStatus() {
+            try {
+                const resp = await fetch(`${API_BASE}/status`);
+                if (!resp.ok) throw new Error('Server not reachable');
+                const data = await resp.json();
+                updateDashboard(data);
+                setStatus('running');
+            } catch (e) {
+                // Try to read from local file as fallback
+                tryLocalMetrics();
+            }
+        }
+
+        async function tryLocalMetrics() {
+            try {
+                const resp = await fetch(`${API_BASE}/metrics`);
+                if (resp.ok) {
+                    const metrics = await resp.json();
+                    if (metrics.length > 0) {
+                        processMetrics(metrics);
+                        setStatus('running');
+                        return;
+                    }
+                }
+            } catch (e) {}
+            setStatus('offline');
+        }
+
+        function processMetrics(metrics) {
+            lossData.length = 0;
+            stepData.length = 0;
+            metrics.forEach(m => {
+                if (m.loss) {
+                    stepData.push(m.step);
+                    lossData.push(m.loss);
+                }
+            });
+            chart.update();
+
+            if (metrics.length > 0) {
+                const last = metrics[metrics.length - 1];
+                document.getElementById('stat-step').textContent = last.step;
+                document.getElementById('stat-loss').textContent = last.loss ? last.loss.toFixed(4) : '—';
+                document.getElementById('stat-epoch').textContent = last.epoch ? last.epoch.toFixed(2) : '—';
+
+                // ETA calculation
+                if (totalSteps > 0 && last.elapsed_s) {
+                    const pct = last.step / totalSteps;
+                    const remaining = (last.elapsed_s / pct) * (1 - pct);
+                    document.getElementById('stat-eta').textContent = formatTime(remaining);
+                    document.getElementById('progress-bar').style.width = `${pct * 100}%`;
+                    document.getElementById('progress-pct').textContent = `${(pct * 100).toFixed(1)}%`;
+                }
+                if (last.samples_per_sec) {
+                    document.getElementById('stat-throughput').textContent = `${last.samples_per_sec} samples/s`;
+                }
+            }
+        }
+
+        function updateDashboard(data) {
+            if (data.step !== undefined) {
+                document.getElementById('stat-step').textContent = data.step;
+            }
+            if (data.loss !== undefined) {
+                document.getElementById('stat-loss').textContent = data.loss.toFixed(4);
+            }
+            if (data.epoch !== undefined) {
+                document.getElementById('stat-epoch').textContent = data.epoch.toFixed(2);
+            }
+            if (data.total_steps) {
+                totalSteps = data.total_steps;
+                document.getElementById('stat-step-total').textContent = `/ ${totalSteps}`;
+            }
+            if (data.metrics) {
+                processMetrics(data.metrics);
+            }
+        }
+
+        function setStatus(status) {
+            const dot = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+            switch (status) {
+                case 'running':
+                    dot.className = 'w-2 h-2 rounded-full bg-emerald-500 pulse';
+                    text.textContent = 'Training';
+                    break;
+                case 'complete':
+                    dot.className = 'w-2 h-2 rounded-full bg-blue-500';
+                    text.textContent = 'Complete';
+                    break;
+                case 'offline':
+                    dot.className = 'w-2 h-2 rounded-full bg-gray-500';
+                    text.textContent = 'Offline';
+                    break;
+            }
+        }
+
+        function formatTime(seconds) {
+            if (seconds < 60) return `${Math.round(seconds)}s`;
+            if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+            return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+        }
+
+        function addLog(msg) {
+            const container = document.getElementById('log-container');
+            const line = document.createElement('div');
+            const time = new Date().toLocaleTimeString();
+            line.innerHTML = `<span class="text-slate-500">[${time}]</span> ${msg}`;
+            container.appendChild(line);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('log-container').innerHTML = '';
+        }
+
+        async function startTraining() {
+            addLog('<span class="text-blue-400">Starting training pipeline...</span>');
+            try {
+                const resp = await fetch(`${API_BASE}/train`, { method: 'POST' });
+                if (resp.ok) {
+                    addLog('<span class="text-emerald-400">Training started!</span>');
+                    setStatus('running');
+                } else {
+                    addLog('<span class="text-red-400">Failed to start training</span>');
+                }
+            } catch (e) {
+                addLog(`<span class="text-yellow-400">Cannot reach training server. Run: python tools/training-server.py</span>`);
+            }
+        }
+
+        // --- Demo mode (load from SSE or poll) ---
+        function startPolling() {
+            pollInterval = setInterval(pollStatus, 3000);
+            pollStatus();
+        }
+
+        // --- EventSource for real-time logs ---
+        function connectSSE() {
+            try {
+                const es = new EventSource(`${API_BASE}/logs`);
+                es.onmessage = (e) => {
+                    const data = JSON.parse(e.data);
+                    if (data.type === 'log') {
+                        addLog(data.msg);
+                    } else if (data.type === 'metric') {
+                        stepData.push(data.step);
+                        lossData.push(data.loss);
+                        chart.update();
+                        document.getElementById('stat-step').textContent = data.step;
+                        document.getElementById('stat-loss').textContent = data.loss.toFixed(4);
+                        document.getElementById('stat-epoch').textContent = data.epoch.toFixed(2);
+                        const pct = data.step / (totalSteps || data.step);
+                        document.getElementById('progress-bar').style.width = `${pct * 100}%`;
+                        document.getElementById('progress-pct').textContent = `${(pct * 100).toFixed(1)}%`;
+                    }
+                };
+                es.onerror = () => { es.close(); };
+            } catch (e) {}
+        }
+
+        // Start
+        startPolling();
+        connectSSE();
+    </script>
+</body>
+</html>

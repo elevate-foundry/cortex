@@ -88,6 +88,29 @@ CORTEX_VERBS = {
     "encode", "decode", "fingerprint", "hash",
     # Bridge
     "bridge", "translate", "emit", "parse",
+    # --- AI-Native OS Ontology (complete operational vocabulary) ---
+    # Lifecycle
+    "boot", "spawn", "fork", "merge", "sleep", "resume", "kill", "handoff",
+    # Observation
+    "observe", "inspect", "detect", "enumerate", "extract", "measure",
+    # Data flow
+    "read", "write", "call", "receive",
+    # Planning
+    "plan", "propose", "decide", "schedule",
+    # Execution
+    "execute", "apply", "mutate", "transform", "compress", "expand",
+    # Causality
+    "depends_on", "causes", "blocks", "enables", "contradicts", "invalidates",
+    # Authorization
+    "permits", "denies", "requires", "grants",
+    # Repair
+    "fail", "diagnose", "repair", "patch", "rollback", "recover",
+    # Knowledge
+    "summarize", "claim", "support", "refute",
+    # State sync
+    "commit", "checkpoint", "snapshot", "sync", "gossip",
+    # Verification (extended)
+    "prove", "test", "check", "validate",
 }
 
 

@@ -173,6 +173,16 @@ class DaemonServer:
         # Start gossip transport background task
         asyncio.create_task(self.gossip.gossip_task())
 
+        # Start network watcher background task
+        from .network_watcher import NetworkWatcher
+        self._network_watcher = NetworkWatcher()
+        asyncio.create_task(self._network_watcher.run())
+
+        # Initialize lifecycle SCL log
+        from .lifecycle_scl import init_lifecycle_log
+        data_dir = os.environ.get("CORTEX_DATA_DIR", "/tmp")
+        init_lifecycle_log(f"{data_dir}/var/lib")
+
         async with server:
             await server.serve_forever()
 
@@ -282,6 +292,10 @@ class DaemonServer:
                 await self._handle_gossip_state(writer)
             elif path == "/v1/gossip/stats" and method == "GET":
                 await self._handle_gossip_stats(writer)
+            elif path == "/boot-trace" and method == "GET":
+                await self._handle_boot_trace(writer)
+            elif path == "/lifecycle" and method == "GET":
+                await self._handle_lifecycle(writer)
             else:
                 await self._send_json(writer, 404, {
                     "error": {"message": f"Not found: {path}", "type": "invalid_request"}
@@ -789,8 +803,41 @@ class DaemonServer:
             1 for m in mgr_status.get("models", [])
             if m["state"] == "ready"
         )
+        # Determine network state
+        network_state = "offline"
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.1)
+            s.connect(("8.8.8.8", 53))
+            network_state = "online"
+            s.close()
+        except Exception:
+            # Check if any non-loopback interface has an IP
+            try:
+                import subprocess
+                r = subprocess.run(["ip", "-4", "addr"], capture_output=True,
+                                   text=True, timeout=2)
+                if r.returncode == 0 and "inet " in r.stdout.replace("127.0.0.1", ""):
+                    network_state = "local"
+            except Exception:
+                pass
+
+        # Determine inference mode
+        backend_url = os.environ.get("OLLAMA_URL", "")
+        if "127.0.0.1" in backend_url or "localhost" in backend_url:
+            mode = "local"
+        elif backend_url:
+            mode = "remote"
+        else:
+            mode = "local"
+
         await self._send_json(writer, 200, {
             "status": "ok",
+            "pid1": os.getpid() == 1,
+            "network": network_state,
+            "model": "loaded" if ready_count > 0 else "none",
+            "mode": mode,
             "uptime_seconds": round(uptime, 1),
             "total_requests": self.request_count,
             "models_ready": ready_count,
@@ -1205,6 +1252,50 @@ class DaemonServer:
                     )
             except Exception as e:
                 logger.warning("Policy rewriter error: %s", e)
+
+    async def _handle_boot_trace(self, writer):
+        """Handle GET /boot-trace — return boot telemetry as SCL text."""
+        try:
+            from .boot_telemetry import BootTelemetry
+            from .scl.emitter import emit_document
+            data_dir = os.environ.get("CORTEX_DATA_DIR", "/tmp")
+            telemetry = BootTelemetry(f"{data_dir}/var/lib")
+            doc = telemetry.to_scl_document()
+            scl_text = emit_document(doc)
+            await self._send_json(writer, 200, {
+                "format": "scl",
+                "boot_count": int(telemetry.state.entries.get("boot_count", "0")),
+                "state_fingerprint": telemetry.state_fingerprint,
+                "records": len(doc.records),
+                "scl": scl_text,
+            })
+        except Exception as e:
+            await self._send_json(writer, 200, {
+                "format": "scl",
+                "boot_count": 0,
+                "error": str(e),
+                "scl": "",
+            })
+
+    async def _handle_lifecycle(self, writer):
+        """Handle GET /lifecycle — return SCL lifecycle records from this session."""
+        try:
+            from .lifecycle_scl import get_lifecycle_records
+            from .scl.emitter import emit_record
+            records = get_lifecycle_records()
+            scl_lines = [emit_record(r) for r in records]
+            await self._send_json(writer, 200, {
+                "format": "scl",
+                "records": len(records),
+                "scl": "\n".join(scl_lines),
+            })
+        except Exception as e:
+            await self._send_json(writer, 200, {
+                "format": "scl",
+                "records": 0,
+                "error": str(e),
+                "scl": "",
+            })
 
     async def _send_json(self, writer, status: int, data):
         """Send a JSON HTTP response."""

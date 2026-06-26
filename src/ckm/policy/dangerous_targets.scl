@@ -1,0 +1,25 @@
+@policy → define [type: blocklist, name: dangerous_targets]
+
+@target → block [path: /dev/mem, reason: raw_physical_memory_access]
+@target → block [path: /dev/kmem, reason: kernel_virtual_memory_access]
+@target → block [path: /proc/kcore, reason: kernel_core_dump_access]
+@target → block [path: /dev/sda, reason: raw_block_device_access]
+@target → block [path: /dev/nvme0, reason: raw_nvme_device_access]
+@target → block [path: /dev/port, reason: raw_io_port_access]
+@target → block [path: /dev/hda, reason: raw_block_device_access]
+@target → block [path: /dev/vda, reason: raw_block_device_access]
+@target → block [path: /dev/mmcblk0, reason: raw_emmc_device_access]
+
+@policy → enforce [
+  action: deny,
+  severity: critical,
+  override: none,
+  reason: raw_hardware_access_forbidden_for_ckm_model
+]
+
+@policy → note [
+  safe_alternative: observe_memory_pressure,
+  safe_alternative: read_proc_meminfo,
+  safe_alternative: inspect_sysfs_attributes,
+  principle: model_has_recommendation_authority_only
+]

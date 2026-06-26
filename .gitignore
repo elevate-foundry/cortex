@@ -17,3 +17,8 @@ ENV/
 .idea/
 .vscode/
 *.iml
+
+# Large model files (use git-lfs or download separately)
+*.gguf
+*.bin
+*.safetensors
