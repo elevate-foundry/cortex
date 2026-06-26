@@ -2,11 +2,12 @@
 
 **AI as PID 1.** An AI-native operating system kernel where the inference engine isn't an app — it's `init`.
 
-Cortex is three things:
+Cortex is four things:
 
 1. **An inference runtime** — detects your hardware, builds a tiered model hierarchy (L0–L7), and routes every request to the smallest model that can handle it.
 2. **A semantic protocol** — SCL (Semantic Compression Language) gives every routing decision, agent state, and audit event a machine-parseable, human-readable representation.
-3. **A self-hosting system** — the coordination protocol used to build Cortex is written in the language Cortex is building. The system builds itself with itself.
+3. **A self-modifying system** — observes its own performance and mutates routing policy, boot config, and model weights to improve over time.
+4. **A self-hosting system** — the coordination protocol used to build Cortex is written in the language Cortex is building. The system builds itself with itself.
 
 ---
 
@@ -22,12 +23,22 @@ python -m src tiers
 # Route a prompt to the appropriate tier
 python -m src route "refactor the database layer to use connection pooling"
 
-# Launch the optimal inference server
-python -m src serve
+# Start the daemon (OpenAI-compatible proxy on localhost:11411)
+python -m src daemon
 
 # Simulate different hardware profiles
 python -m src detect --simulate linux-h100
 python -m src tiers --simulate mac-m4-ultra
+
+# Self-training: train, eval, promote the Cortex Kernel Model
+python -m src train --time-budget 10m
+python -m src train --status
+python -m src train --rollback
+
+# Multi-host gossip protocol
+python -m src gossip add --id node-02 --url http://192.168.1.42:11411
+python -m src gossip list
+python -m src gossip state
 ```
 
 ---
@@ -130,6 +141,137 @@ Merge conflicts between concurrent agents are resolved by:
 - **CRDT** — set-valued keys auto-merge (G-Set union)
 - **Escalation** — unresolvable conflicts defer to the conductor
 
+### Layer 5: Gossip Protocol
+
+Multi-host coordination via epidemic delta propagation:
+
+```python
+from src.scl.gossip import Swarm, Peer
+
+swarm = Swarm(convergence_threshold=0.95)
+swarm.add_peer("node_01", initial_state=state_a)
+swarm.add_peer("node_02", initial_state=state_b)
+rounds = swarm.run_until_converged()  # O(log N) rounds
+```
+
+Protocol: fingerprint-first comparison → push/pull only divergent deltas → CRDT merge. Bandwidth is O(1) when states match, O(k) when k keys differ.
+
+Over HTTP, the daemon exposes `/v1/gossip` endpoints for real multi-host sync.
+
+### Layer 6: Executable SCL (Rule Engine)
+
+SCL is not just data — it's a programming language. The evaluator turns SCL records into executable rules:
+
+```python
+from src.scl.eval import RuleEngine, Rule, Condition, Action, CompareOp, ActionType
+
+engine = RuleEngine()
+engine.add_rule(Rule(
+    name="escalate_complex",
+    conditions=[Condition("complexity", CompareOp.GT, "0.8")],
+    actions=[Action(ActionType.ESCALATE, target="L5")],
+))
+
+# Self-modification: agents rewrite their own rules via SCL
+engine.process_meta(SCLRecord.from_text(
+    '@triage → define [fn: classify, body: "@task → route [tier: $tier]"]'
+))
+```
+
+Rules support conditions (==, !=, >, <, in, regex), compound logic (∧, ∨, ¬), variable binding ($var substitution), function definitions (λ abstraction), and self-modification (agents rewrite their own rules via deltas gossiped across the swarm).
+
+---
+
+## Daemon
+
+The daemon (`python -m src daemon`) is an OpenAI-compatible HTTP proxy on `localhost:11411`:
+
+```bash
+# Chat completion (routes automatically)
+curl http://localhost:11411/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "auto", "messages": [{"role": "user", "content": "hello"}]}'
+
+# Streaming
+curl http://localhost:11411/v1/chat/completions \
+  -d '{"model": "auto", "stream": true, "messages": [...]}'
+
+# Status
+curl http://localhost:11411/v1/status
+```
+
+Background tasks running inside the daemon:
+- **Policy Rewriter** — analyzes routing feedback every 5 minutes, proposes and applies policy mutations
+- **Boot Telemetry** — tracks hardware fingerprints, boot timing, and optimal configs
+- **Gossip Sync** — periodic delta exchange with known peers
+- **SCL Audit** — logs every routing decision as fingerprinted SCL documents
+
+---
+
+## Self-Modification (Cortex-Mutate)
+
+Cortex observes its own performance and rewrites its configuration:
+
+```
+@cortex → observe [request, hardware, latency, accuracy]   # steady state
+@cortex → mutate [tier_specs, model_weights, boot_config]   # self-modification
+```
+
+**Policy Rewriter** (`src/policy_rewriter.py`):
+- Runs as a background daemon task every 5 minutes
+- Analyzes per-tier and per-model accuracy from routing feedback
+- Proposes `MutationProposal` objects (tier demotion, model penalty)
+- Auto-applies if confidence > 0.7; records full audit trail before application
+- Rollback always available via mutation history
+
+**Boot Self-Modification** (`src/boot_telemetry.py`):
+- Logs hardware fingerprint + boot timing each boot
+- Background optimizer proposes mutations to thread count, GPU layers, context window
+- Same USB stick on different machines → different optimal configs
+- The stick gets smarter with each boot
+
+Safety boundaries:
+- Minimum 10 feedback samples before any mutation
+- Confidence gating (only apply if confidence > 0.7)
+- Every mutation audited before applied
+- Rollback capability preserved indefinitely
+
+---
+
+## CKM: Cortex Kernel Model (Self-Training)
+
+The Cortex Kernel Model is a tiny (1M–60M param) transformer trained from scratch to speak SCL. It replaces all heuristics with learned inference:
+
+```bash
+# Full self-training loop
+python -m src train --time-budget 10m
+
+# Evaluate a checkpoint against the eval gate
+python -m src train --eval /path/to/checkpoint.pt
+
+# Show model registry status
+python -m src train --status
+
+# Rollback to previous model version
+python -m src train --rollback
+```
+
+**Training pipeline:**
+1. Hardware profiling → selects largest model that fits (ckm-1m through ckm-60m)
+2. Synthetic data generation (boot configs, routing decisions, policy mutations, operational traces)
+3. From-scratch GPT-style transformer (RMSNorm, RoPE, SwiGLU, GQA)
+4. Eval gate: 99% SCL validity, 100% safety denial, 95% verb choice, 90% config completeness
+5. Promote/reject/rollback with full SCL lifecycle emission
+
+**Two planned model specializations:**
+- **CortexRouter** — routes requests to tiers (<5ms, every request, observe-only authority)
+- **CortexMutate** — proposes policy/config mutations (background, high-risk, safety-gated)
+
+**Safety policy** (`src/ckm/policy/`):
+- `dangerous_targets.scl` — 9 blocked paths (/dev/mem, /dev/kmem, etc.)
+- `allowed_verbs.scl` — verb allowlist/blocklist
+- Model has recommendation authority only — never raw execution
+
 ---
 
 ## The Self-Hosting Loop
@@ -158,36 +300,78 @@ This is not a metaphor. It is the architecture.
 
 ```
 src/
-├── cortex.py           # Top-level orchestrator (PID 1)
-├── router.py           # L0 request classifier
-├── tiers.py            # L0–L7 tier specs and model catalogs
-├── challenger.py       # Cross-family verification
-├── swarm.py            # Multi-model consensus
-├── model_manager.py    # Model lifecycle (load/evict/health-check)
-├── backend_adapter.py  # Unified interface: Ollama, llama.cpp, vLLM
-├── daemon.py           # HTTP proxy (localhost:11411)
-├── memory.py           # SQLite persistence (threads, audit, KV cache)
-├── policy.py           # Per-app/thread policy engine
-├── tools.py            # Tool registry with permission rings
-├── resilience.py       # Circuit breaker + retry
-├── hardware_detect.py  # CPU/GPU/RAM/backend detection
-├── api_adapter.py      # OpenAI/Anthropic/Responses API translation
+├── cortex.py             # Top-level orchestrator (route → generate → challenge → swarm)
+├── router.py             # L0 request classifier (heuristic + model-based)
+├── tiers.py              # L0–L7 tier specs, model catalogs, feasibility assessment
+├── challenger.py         # Cross-family verification (Qwen vs Llama vs Gemma vs Granite)
+├── swarm.py              # Multi-model consensus with weighted voting
+├── model_manager.py      # Model lifecycle (load/evict/health-check/VRAM budget)
+├── backend_adapter.py    # Unified interface: Ollama, llama.cpp, vLLM, OpenAI, Anthropic
+├── backend_selector.py   # Automatic backend detection and selection
+├── daemon.py             # HTTP proxy (localhost:11411), OpenAI-compatible API
+├── memory.py             # SQLite persistence (threads, audit, KV cache, WAL mode)
+├── policy.py             # Per-app/thread policy engine (rate limits, model blocklists)
+├── policy_rewriter.py    # Self-modifying policy: feedback → mutation proposals → apply
+├── tools.py              # Tool registry with permission rings (ring 0–3)
+├── resilience.py         # Circuit breaker + exponential backoff retry
+├── hardware_detect.py    # CPU/GPU/RAM/backend detection (CUDA, MPS, ROCm, CPU)
+├── api_adapter.py        # OpenAI/Anthropic/Responses API format translation
+├── micro_engine.py       # CKM inference engine with 4-phase safety guardrail
+├── boot_telemetry.py     # Boot timing, hardware fingerprint, config optimization
+├── gossip_transport.py   # HTTP gossip transport (push/pull deltas between hosts)
+├── gossip_discovery.py   # Peer discovery and management
+├── boot_gossip_bridge.py # Bridge between boot telemetry and gossip layer
+├── network_watcher.py    # Network state monitoring
+├── lifecycle_scl.py      # SCL emission for system lifecycle events
+├── config.py             # Global configuration
 ├── scl/
-│   ├── types.py        # Anchor, Relation, Scope, SCLRecord, SCLDocument
-│   ├── parser.py       # Text → SCL AST (strict/lenient)
-│   ├── emitter.py      # SCL AST → text (compact/aligned/table)
-│   ├── grammar.py      # Formal BNF specification
-│   ├── delta.py        # Semantic state deltas, vector clocks, merge
-│   └── cortex_bridge.py # Cortex types ↔ SCL conversion
-└── braille/
-    ├── codec.py        # Bijective byte ↔ Braille encoding
-    ├── fingerprint.py  # SCL → fixed-width Braille hash (LSH)
-    └── manifest.py     # Routing/tier/system manifests in Braille
+│   ├── types.py          # Anchor, Relation, Scope, SCLRecord, SCLDocument
+│   ├── parser.py         # Text → SCL AST (strict/lenient modes)
+│   ├── emitter.py        # SCL AST → text (compact/aligned/table)
+│   ├── grammar.py        # Formal BNF specification
+│   ├── delta.py          # Semantic state deltas, vector clocks, merge strategies
+│   ├── gossip.py         # Epidemic gossip protocol (Peer, Swarm, convergence)
+│   ├── eval.py           # Rule engine: conditions → actions, self-modifying rules
+│   ├── cortex_bridge.py  # Cortex runtime types ↔ SCL conversion
+│   ├── audit.py          # SCL audit document + fingerprint generation
+│   ├── ontology.py       # Typed entity/relation/transition ontology, CKM task types
+│   └── intent.py         # Intent classification from SCL records
+├── braille/
+│   ├── codec.py          # Bijective byte ↔ Braille encoding (U+2800–U+28FF)
+│   ├── fingerprint.py    # SCL → fixed-width Braille hash (LSH, Hamming similarity)
+│   └── manifest.py       # Routing/tier/system manifests in Braille
+└── ckm/
+    ├── cli.py            # CLI: cortex train {run, eval, rollback, status}
+    ├── data_generator.py # Boot/routing/policy training pair generation
+    ├── trace_generator.py# Full operational trace corpus (boot, route, debug, gossip)
+    ├── dataset.py        # JSONL → curriculum-ordered → tokenized mmap (BPE, 512 vocab)
+    ├── train.py          # Fine-tuning pipeline (LoRA on Qwen2.5-0.3B / SmolLM2)
+    ├── train_scratch.py  # From-scratch GPT transformer (RMSNorm, RoPE, SwiGLU, GQA)
+    ├── eval.py           # Eval gate: SCL validity, safety, verb choice, completeness
+    ├── promote.py        # Model registry: stage, promote, rollback, version management
+    ├── profile.py        # Hardware profiler, model ladder selection
+    ├── simulator.py      # Training simulation and validation
+    ├── world_model.py    # World model for CKM training
+    ├── modal_train.py    # Modal.com cloud training integration
+    └── policy/           # dangerous_targets.scl, allowed_verbs.scl
 
-tests/                  # 108 tests across 4 test files
-AGENTS.md               # Multi-agent coordination plan (in SCL)
-WHITEPAPER.md           # Full technical paper
+tests/                    # Unit + integration tests
+├── test_scl_parser.py    # SCL parser round-trip and edge cases
+├── test_scl_delta.py     # Delta, vector clock, merge, stream tests
+├── test_scl_intent.py    # Intent classification tests
+├── test_braille_codec.py # Braille encoding/decoding tests
+├── test_braille_fingerprint.py  # Fingerprint + similarity tests
+├── test_gossip.py        # Gossip protocol convergence tests
+├── test_ckm_external.py  # CKM end-to-end training tests
+├── test_ckm_inference.py # CKM inference pipeline tests
+├── test_reboot_loop.sh   # Multi-boot self-modification integration test
+└── conftest.py           # Shared fixtures
+
+AGENTS.md                 # Multi-agent coordination plan (in SCL)
+WHITEPAPER.md             # Full technical paper
 ```
+
+---
 
 ## Supported Platforms
 
@@ -202,12 +386,14 @@ WHITEPAPER.md           # Full technical paper
 ## Requirements
 
 - Python 3.10+
+- PyTorch (for CKM self-training; optional for inference-only use)
 - At least one inference backend installed (Ollama is easiest to start with)
 
 ## Documentation
 
 - **[WHITEPAPER.md](WHITEPAPER.md)** — full technical paper
 - **[AGENTS.md](AGENTS.md)** — multi-agent coordination plan (written in SCL)
+- **[boot/ARCHITECTURE.md](boot/ARCHITECTURE.md)** — v3 architecture vision (three pillars)
 
 ## License
 

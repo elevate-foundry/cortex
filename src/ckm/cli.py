@@ -283,6 +283,17 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_sm(args) -> int:
+    """Run the CKM-SM state machine training pipeline."""
+    from .train_sm import train_full_pipeline
+    results = train_full_pipeline(
+        output_dir=args.output_dir,
+        device=args.device,
+        phases=args.phases,
+    )
+    return 0 if "error" not in str(results) else 1
+
+
 def main(argv=None) -> int:
     """CKM CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -330,6 +341,14 @@ def main(argv=None) -> int:
     status_parser = sub.add_parser("status", help="Show model registry status")
     status_parser.add_argument("--registry-dir", default="/tmp/cortex-train/output/registry")
     status_parser.set_defaults(func=cmd_status)
+
+    # SM (state machine) subcommand — new optimized training regime
+    sm_parser = sub.add_parser("sm", help="Run CKM-SM state machine training (RL + self-play)")
+    sm_parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
+    sm_parser.add_argument("--output-dir", default="/tmp/cortex-train/sm")
+    sm_parser.add_argument("--phases", default="1-6",
+                          help="Which phases to run (e.g., '1-6', '3-5', '6')")
+    sm_parser.set_defaults(func=cmd_sm)
 
     args = parser.parse_args(argv)
 

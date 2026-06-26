@@ -48,7 +48,6 @@ training_image = (
         "bitsandbytes==0.44.1",
         "datasets==3.1.0",
         "accelerate==1.1.1",
-        "flash-attn==2.6.3",  # Flash Attention 2 for A100 — 2x faster attention
         "sentencepiece",
         "protobuf",
         "scipy",
@@ -597,7 +596,7 @@ def train_model(
         TrainerControl,
     )
     from peft import LoraConfig, get_peft_model
-    from trl import SFTTrainer
+    from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 
     # --- Logging setup ---
     logging.basicConfig(
@@ -653,7 +652,7 @@ def train_model(
         torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
-        attn_implementation="flash_attention_2",
+        attn_implementation="sdpa",  # PyTorch native, no extra deps
     )
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
@@ -688,9 +687,7 @@ def train_model(
                 if not line.strip():
                     continue
                 pair = json.loads(line)
-                # Use apply_chat_template to ensure special tokens
-                # (<|im_start|>, <|im_end|>) get their correct token IDs
-                # rather than being tokenized as literal text.
+                # Format with chat template (special tokens get correct IDs)
                 messages = [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": pair["input"]},
@@ -708,7 +705,7 @@ def train_model(
     log.info(f"  Train samples: {len(train_dataset)}")
     if eval_dataset:
         log.info(f"  Eval samples:  {len(eval_dataset)}")
-    log.info(f"  Sample text:   {train_dataset[0]['text'][:120]}...")
+    log.info(f"  Sample:        {train_dataset[0]['text'][:120]}...")
     log.info("")
 
     # --- Apply LoRA ---
@@ -845,17 +842,22 @@ def train_model(
     # --- Create trainer ---
     callback = CKMTrainingCallback()
 
-    def formatting_func(example):
-        """Return pre-formatted text with special tokens intact."""
-        return example["text"]
+    # Mask loss on everything before assistant response.
+    # The model only learns to produce the SCL output, not to predict system/user tokens.
+    response_template = "<|im_start|>assistant\n"
+    collator = DataCollatorForCompletionOnlyLM(
+        response_template=response_template,
+        tokenizer=tokenizer,
+    )
 
     trainer = SFTTrainer(
         model=model,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         args=training_args,
-        tokenizer=tokenizer,
-        formatting_func=formatting_func,
+        processing_class=tokenizer,
+        data_collator=collator,
+        dataset_text_field="text",
         max_seq_length=MAX_SEQ_LENGTH,
         callbacks=[callback],
     )
@@ -1104,12 +1106,13 @@ def validate_model() -> dict:
         result = subprocess.run(
             [llama_cli, "-m", model_path,
              "-p", prompt,
-             "-n", "128",
+             "-n", "64",
              "--temp", "0.0",
              "--no-display-prompt",
+             "--simple-io",
              "-c", "512",
              "--log-disable"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=30,
         )
         latency = (time.time() - t0) * 1000
 
