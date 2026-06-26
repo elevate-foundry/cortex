@@ -1056,7 +1056,7 @@ This architecture parallels recent work in self-modifying AI:
 
 - **RouteLLM** (UC Berkeley, 2024) — trained routers that reduce cost by 85% while maintaining 95% quality. CortexRouter is a local, embedded variant of this pattern.
 - **SEAL** (NeurIPS 2025) — LLMs that generate their own finetuning data and update directives. CortexMutate implements this at the policy/config level rather than weight level.
-- **Martian** (2024) — production model router predicting per-model performance without running models. Cortex extends this with self-modification and local inference.
+- **Martian** (2024, $18M raised, ~$1.3B valuation by mid-2026) — production model router that dynamically selects the optimal cloud LLM per prompt, achieving 20–97% cost reduction for 300+ enterprise customers. Martian validates that the routing layer is where value accrues. Cortex extends this thesis in three directions Martian cannot: local-first inference (nothing leaves the machine), cross-family confidence verification (no single model trusted), and gossip-mediated collective intelligence (the frontier is a swarm, not an API). The two are complementary — Cortex's L7 could use Martian as its remote fallback optimizer.
 - **Darwin Gödel Machine** (2025) — self-referential agents that edit their own source code. Cortex's policy rewriter operates on the same principle within typed safety boundaries.
 
 The novel contribution is the combination: a local, embedded routing model + a self-modifying policy engine + typed SCL mutations + safety gating + full audit trail, all running on a 259-token Braille vocabulary from a thumb drive.
