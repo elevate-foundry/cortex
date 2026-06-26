@@ -299,6 +299,8 @@ class DaemonServer:
                 await self._handle_gossip_add_peer(writer, body)
             elif path == "/v1/gossip/state" and method == "GET":
                 await self._handle_gossip_state(writer)
+            elif path == "/v1/gossip/convergence" and method == "GET":
+                await self._handle_gossip_convergence(writer)
             elif path == "/v1/gossip/stats" and method == "GET":
                 await self._handle_gossip_stats(writer)
             elif path == "/boot-trace" and method == "GET":
@@ -1214,10 +1216,18 @@ class DaemonServer:
         """GET /v1/gossip/state — current Braille fingerprint of local state."""
         await self._send_json(writer, 200, {
             "node_id": self.gossip.node_id,
-            "fingerprint": self.gossip.local_peer.state_fingerprint(),
+            "fingerprint": self.gossip.shared_fingerprint(),
+            "shared_fingerprint": self.gossip.shared_fingerprint(),
+            "local_fingerprint": self.gossip.local_fingerprint(),
+            "full_fingerprint": self.gossip.local_peer.state_fingerprint(),
             "state_keys": len(self.gossip.local_peer.state.entries),
+            "shared_keys": len(self.gossip._shared_entries()),
             "stream_length": self.gossip.local_peer.stream.length,
         })
+
+    async def _handle_gossip_convergence(self, writer):
+        """GET /v1/gossip/convergence — shared/local convergence view."""
+        await self._send_json(writer, 200, self.gossip.convergence())
 
     async def _handle_gossip_stats(self, writer):
         """GET /v1/gossip/stats — gossip transport statistics."""

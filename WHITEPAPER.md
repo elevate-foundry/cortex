@@ -663,7 +663,7 @@ This architecture gives three superpowers at scale:
 
 ### 13.7 Gossip Protocol
 
-At scale, agents don't talk to a central server. They gossip: each agent periodically picks a random peer and exchanges deltas. The protocol is fingerprint-first — a 4-character Braille hash is compared before any data is sent.
+At scale, agents don't talk to a central server. They gossip: each agent periodically picks a random peer and exchanges deltas. The protocol is fingerprint-first — a 4-character Braille hash of the shared semantic state is compared before any data is sent.
 
 **Push-pull anti-entropy:**
 
@@ -681,10 +681,22 @@ Content-keyed deduplication ensures each unique delta is applied exactly once, r
 | Swarm Size | Rounds to Converge | Total Deltas | Epidemic Factor |
 |------------|-------------------|--------------|----------------|
 | 5 agents | 1 | 18 | O(1) |
+| 10 agents | ≤4 | ~80 | O(log N) |
 | 50 agents | 4 | ~200 | O(log N) |
 | N agents | O(log N) | O(N) | Epidemic |
 
-Convergence is detected by comparing content hashes — O(N) against a reference, not O(N²) pairwise. Once converged, subsequent gossip rounds cost zero data transfer (fingerprint hits).
+Convergence is detected by comparing shared-state content hashes — O(N) against a reference, not O(N²) pairwise. Each node also retains local and full fingerprints for identity, stream position, and diagnostics; those may differ even when the shared semantic state has converged. Once shared state converges, subsequent gossip rounds cost zero data transfer (fingerprint hits).
+
+**Canonical ordering guarantee:** Deltas are inserted into each peer's stream in deterministic order by `(timestamp_ms, agent_id, seq)`. This ensures all peers that receive the same set of deltas materialize identical state — regardless of network arrival order, partitioning, or gossip pairing randomness. State fingerprints are agent-agnostic (computed over entries only, not peer identity), so convergence detection works correctly across heterogeneous node IDs.
+
+**Verified invariants** (11-step convergence proof, `tests/test_scl_gossip.py`):
+
+1. Node A (N keys, M deltas) gossips to empty Node B → identical materialized state
+2. Shared-state fingerprints match post-convergence
+3. Compacted delta histories are equivalent (valid history proof)
+4. Fingerprints survive node restart (reconstructible from delta stream)
+5. Mutations on B gossip back to A → bidirectional convergence
+6. Concurrent mutations resolve deterministically via canonical ordering + LWW
 
 **Swarm-level API** (`src/scl/gossip.py`):
 
@@ -785,7 +797,7 @@ fingerprint(SCLRecord(Anchor('router'), Relation('select'),
             Scope({'model': 'qwen3:4b'})))  # → '⢍⠱⡈⠦'
 ```
 
-**Convergence checking** uses Hamming distance between fingerprints:
+**Convergence checking** uses Hamming distance between shared-state fingerprints:
 
 | Similarity | Interpretation | Action |
 |------------|---------------|--------|
@@ -793,7 +805,7 @@ fingerprint(SCLRecord(Anchor('router'), Relation('select'),
 | 0.5–0.9 | Partial agreement | Verification needed |
 | < 0.5 | Disagreement | Trigger challenger/swarm |
 
-At scale, agents broadcast fingerprints (4 chars) instead of full state. Cluster-heads aggregate fingerprints for sub-swarms. This reduces gossip bandwidth by orders of magnitude.
+At scale, agents broadcast shared fingerprints (4 chars) instead of full state. Local and full fingerprints remain available for node identity and diagnostics. Cluster-heads aggregate shared fingerprints for sub-swarms. This reduces gossip bandwidth by orders of magnitude.
 
 ### 14.3 Manifests
 
@@ -1104,7 +1116,7 @@ SCL record → Braille fingerprint (4 chars) → 4 bytes → FSK (0.7s) → air 
 FSK demod → 4 bytes → Braille fingerprint → compare → sync/skip
 ```
 
-Every layer is reversible. Every layer is verifiable. The same delta that gossips over HTTP at megabits per second can gossip over sound at 300 bits per second. The protocol doesn't change — only the transport.
+Every layer is reversible. Every layer is verifiable. The same shared-state delta that gossips over HTTP at megabits per second can gossip over sound at 300 bits per second. The protocol doesn't change — only the transport.
 
 ### 17.6 Zero Dependencies
 
@@ -1192,6 +1204,7 @@ The system always functions at whatever level the hardware supports, even if tha
 - **Self-hosting coordination**: use Cortex itself to coordinate parallel agent work, with SCL manifests per task and Braille fingerprints for deduplication
 - **Delta-aware swarm consensus**: integrate gossip convergence detection into the existing challenger/swarm pipeline so model deliberation uses delta streams natively
 - **Semantic merge CRDTs**: extend the UNION merge strategy with full CRDT semantics (OR-Set, LWW-Map) for richer conflict-free replication across agent clusters
+- **Cluster-head election**: hierarchical gossip with elected aggregators for O(1) convergence checking in very large swarms (>1000 agents)
 
 ---
 
@@ -1207,7 +1220,7 @@ The CKM closes the loop. A hand-rolled transformer, trained on Braille-encoded S
 
 The result is an inference layer that is faster (by routing to the smallest capable model), more reliable (by measuring confidence empirically across model families), more secure (by enforcing permission rings and policies), universally deployable (by standardizing on GGUF and discovering whatever models are available), self-improving (by observing its own performance and mutating its own policy), and accessible by architecture (by encoding every state atom in a form that has both a visual and a tactile surface).
 
-The acoustic transport pushes this further: the same Braille fingerprint that checks convergence over HTTP can check it over sound. Two air-gapped machines in the same room can gossip state through 300-baud FSK chirps — no network required. The protocol doesn't change. Only the medium does.
+The acoustic transport pushes this further: the same shared-state Braille fingerprint that checks convergence over HTTP can check it over sound. Two air-gapped machines in the same room can gossip state through 300-baud FSK chirps — no network required. The protocol doesn't change. Only the medium does.
 
 The question is not whether AI should be integrated into the operating system. It is whether the operating system should be redesigned around AI. Cortex is an argument that it should — and that the right substrate for that redesign is one where every byte has a shape you can touch, a sound you can hear, and a delta you can gossip.
 

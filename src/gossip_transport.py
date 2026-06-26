@@ -25,7 +25,7 @@ import aiohttp
 
 from .scl.gossip import GossipMessage, GossipMessageType, Peer, Swarm, MergeStrategy
 from .scl.delta import Delta, SemanticState, VectorClock
-from .braille.fingerprint import fingerprint, similarity
+from .braille.fingerprint import fingerprint as scl_fingerprint, similarity
 from .memory import Memory
 
 logger = logging.getLogger("cortex.gossip")
@@ -77,8 +77,9 @@ class GossipTransport:
         self.remote_peers: dict[str, str] = {}
         self._load_peers_from_memory()
 
-        # Track last sync time per peer
+        # Track last sync time and last known shared fingerprint per peer
         self._last_sync: dict[str, float] = {}
+        self._peer_shared_fingerprints: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Peer management
@@ -131,6 +132,70 @@ class GossipTransport:
         self.memory.set_policy(GOSSIP_PEERS_KEY, json.dumps(self.remote_peers))
 
     # ------------------------------------------------------------------
+    # Fingerprints and delta selection
+    # ------------------------------------------------------------------
+
+    def _delta_key(self, delta: Delta) -> tuple:
+        return (delta.agent_id, frozenset(delta.set_keys.items()), frozenset(delta.delete_keys))
+
+    def _unique_deltas(self) -> list[Delta]:
+        seen: set[tuple] = set()
+        unique: list[Delta] = []
+        for delta in self.local_peer.stream.deltas:
+            key = self._delta_key(delta)
+            if key not in seen:
+                seen.add(key)
+                unique.append(delta)
+        return unique
+
+    def _shared_entries(self) -> dict[str, str]:
+        return {
+            key: value
+            for key, value in self.local_peer.state.entries.items()
+            if not key.startswith("local/")
+        }
+
+    def shared_fingerprint(self) -> str:
+        state = SemanticState(entries=self._shared_entries())
+        return scl_fingerprint(state.to_scl("_shared"), width=4)
+
+    def local_fingerprint(self) -> str:
+        state = SemanticState(entries={
+            "node_id": self.node_id,
+            "listen_host": self.listen_host,
+            "listen_port": str(self.listen_port),
+            "stream_length": str(self.local_peer.stream.length),
+        })
+        return scl_fingerprint(state.to_scl("_local"), width=4)
+
+    def convergence(self) -> dict:
+        shared_fp = self.shared_fingerprint()
+        peer_status = []
+        converged = bool(self.remote_peers)
+        for peer_id, url in self.remote_peers.items():
+            peer_fp = self._peer_shared_fingerprints.get(peer_id, "")
+            peer_converged = peer_fp == shared_fp if peer_fp else False
+            converged = converged and peer_converged
+            peer_status.append({
+                "id": peer_id,
+                "url": url,
+                "shared_fingerprint": peer_fp,
+                "converged": peer_converged,
+                "last_sync_seconds_ago": round(time.monotonic() - self._last_sync.get(peer_id, 0), 1),
+            })
+        return {
+            "node_id": self.node_id,
+            "shared_fingerprint": shared_fp,
+            "local_fingerprint": self.local_fingerprint(),
+            "full_fingerprint": self.local_peer.state_fingerprint(),
+            "shared_keys": len(self._shared_entries()),
+            "local_keys": 4,
+            "stream_length": self.local_peer.stream.length,
+            "converged": converged,
+            "peers": peer_status,
+        }
+
+    # ------------------------------------------------------------------
     # HTTP transport: receive gossip message
     # ------------------------------------------------------------------
 
@@ -158,7 +223,7 @@ class GossipTransport:
 
     async def _handle_ping(self, sender: str, remote_fp: str) -> dict:
         """Respond to a PING with our fingerprint and deltas if diverged."""
-        my_fp = self.local_peer.state_fingerprint()
+        my_fp = self.shared_fingerprint()
         sim = similarity(my_fp, remote_fp) if len(my_fp) == len(remote_fp) else 0.0
 
         if sim >= 0.999:
@@ -172,7 +237,7 @@ class GossipTransport:
             }
 
         # Diverged — send our deltas
-        my_deltas = [d.to_dict() for d in self.local_peer.stream.deltas]
+        my_deltas = [d.to_dict() for d in self._unique_deltas()]
         return {
             "msg_type": GossipMessageType.PUSH_DELTA.value,
             "sender": self.node_id,
@@ -206,13 +271,13 @@ class GossipTransport:
             "msg_type": GossipMessageType.PONG.value,
             "sender": self.node_id,
             "receiver": sender,
-            "fingerprint": self.local_peer.state_fingerprint(),
+            "fingerprint": self.shared_fingerprint(),
             "applied": applied,
         }
 
     async def _handle_pull_request(self, sender: str, since_seq: int) -> dict:
         """Send deltas since a given sequence number."""
-        deltas = [d.to_dict() for d in self.local_peer.stream.deltas if d.seq > since_seq]
+        deltas = [d.to_dict() for d in self._unique_deltas() if d.seq > since_seq]
         return {
             "msg_type": GossipMessageType.PULL_RESPONSE.value,
             "sender": self.node_id,
@@ -248,7 +313,7 @@ class GossipTransport:
         t0 = time.monotonic()
 
         # Step 1: PING — send our fingerprint
-        my_fp = self.local_peer.state_fingerprint()
+        my_fp = self.shared_fingerprint()
         ping = {
             "msg_type": GossipMessageType.PING.value,
             "sender": self.node_id,
@@ -262,6 +327,10 @@ class GossipTransport:
 
         msg_type = response.get("msg_type", "")
         diverged = response.get("diverged", False)
+
+        remote_fp = response.get("fingerprint", "")
+        if remote_fp:
+            self._peer_shared_fingerprints[peer_id] = remote_fp
 
         if msg_type == GossipMessageType.PONG.value and not diverged:
             # States match — no data exchange needed
@@ -294,15 +363,17 @@ class GossipTransport:
             self.local_peer.stats.deltas_propagated += applied
 
         # Step 3: Push our deltas back
-        my_deltas = [d.to_dict() for d in self.local_peer.stream.deltas]
+        my_deltas = [d.to_dict() for d in self._unique_deltas()]
         push = {
             "msg_type": GossipMessageType.PUSH_DELTA.value,
             "sender": self.node_id,
             "receiver": peer_id,
-            "fingerprint": self.local_peer.state_fingerprint(),
+            "fingerprint": self.shared_fingerprint(),
             "deltas": my_deltas,
         }
-        await self._send_gossip(peer_url, push)
+        ack = await self._send_gossip(peer_url, push)
+        if ack and ack.get("fingerprint"):
+            self._peer_shared_fingerprints[peer_id] = ack["fingerprint"]
 
         self._last_sync[peer_id] = time.monotonic()
         latency = (time.monotonic() - t0) * 1000
@@ -361,8 +432,12 @@ class GossipTransport:
         """Current gossip transport status."""
         return {
             "node_id": self.node_id,
-            "fingerprint": self.local_peer.state_fingerprint(),
+            "fingerprint": self.shared_fingerprint(),
+            "shared_fingerprint": self.shared_fingerprint(),
+            "local_fingerprint": self.local_fingerprint(),
+            "full_fingerprint": self.local_peer.state_fingerprint(),
             "state_keys": len(self.local_peer.state.entries),
+            "shared_keys": len(self._shared_entries()),
             "stream_length": self.local_peer.stream.length,
             "peers": len(self.remote_peers),
             "stats": {

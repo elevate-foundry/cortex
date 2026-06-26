@@ -191,7 +191,11 @@ class Peer:
             seq=self.stream.length + 1,
             weight=self.weight,
         )
-        self.stream.append(delta)
+        delta_key = (delta.agent_id, frozenset(delta.set_keys.items()),
+                     frozenset(delta.delete_keys))
+        if delta_key not in self._seen_deltas:
+            self._seen_deltas.add(delta_key)
+            self.stream.append(delta)
         return delta
 
     def receive_delta(self, delta: Delta) -> Optional[SemanticState]:
