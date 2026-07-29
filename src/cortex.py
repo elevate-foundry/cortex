@@ -524,6 +524,113 @@ class Cortex:
         "deepseek/deepseek-chat-v3-0324",
     ]
 
+    # Expanded pool by family — for adaptive selection
+    _RACE_POOL = {
+        # Tier 1: fastest/cheapest (always include)
+        "fast": [
+            "openai/gpt-4o-mini",
+            "google/gemini-2.0-flash-001",
+            "mistralai/mistral-small-24b-instruct-2501",
+            "qwen/qwen3-coder",
+            "deepseek/deepseek-chat-v3-0324",
+        ],
+        # Tier 2: strong reasoning (add for medium difficulty)
+        "reasoning": [
+            "anthropic/claude-3.5-haiku",
+            "google/gemini-2.5-flash",
+            "deepseek/deepseek-r1",
+            "qwen/qwen3-235b-a22b",
+            "nvidia/llama-3.1-nemotron-70b-instruct",
+        ],
+        # Tier 3: frontier (add for hard problems)
+        "frontier": [
+            "openai/gpt-4o",
+            "anthropic/claude-sonnet-4",
+            "google/gemini-2.5-pro",
+            "deepseek/deepseek-r1",
+            "meta-llama/llama-4-maverick",
+        ],
+        # Tier 4: specialists (add when domain-specific)
+        "code": [
+            "qwen/qwen3-coder",
+            "deepseek/deepseek-chat-v3-0324",
+            "openai/gpt-4o-mini",
+            "anthropic/claude-sonnet-4",
+            "mistralai/codestral-2501",
+        ],
+        "math": [
+            "deepseek/deepseek-r1",
+            "qwen/qwen3-235b-a22b",
+            "openai/o4-mini",
+            "google/gemini-2.5-pro",
+        ],
+    }
+
+    def select_candidates(
+        self,
+        prompt: str,
+        complexity: float = 0.0,
+        category: str = "",
+        max_candidates: int = 20,
+    ) -> list[str]:
+        """
+        Adaptively select race candidates based on task difficulty.
+
+        Strategy:
+          - Complexity < 0.3 (easy):   3 fast models (diverse families)
+          - Complexity 0.3-0.6 (med):  5-8 models (fast + reasoning)
+          - Complexity 0.6-0.8 (hard): 10-15 models (fast + reasoning + frontier)
+          - Complexity > 0.8 (critical): 15-20 (all tiers + specialists)
+
+        Always ensures cross-family diversity (no more than 2 per provider).
+        """
+        from .router import _estimate_complexity, _categorize
+
+        # Auto-detect if not provided
+        if not complexity:
+            complexity = _estimate_complexity(prompt)
+        if not category:
+            cat_result = _categorize(prompt)
+            category = cat_result.name if hasattr(cat_result, 'name') else str(cat_result)
+
+        candidates = []
+        seen_families = {}
+
+        def add_tier(pool_key: str, max_per_family: int = 2):
+            for model in self._RACE_POOL.get(pool_key, []):
+                family = model.split("/")[0]
+                if seen_families.get(family, 0) >= max_per_family:
+                    continue
+                if model not in candidates:
+                    candidates.append(model)
+                    seen_families[family] = seen_families.get(family, 0) + 1
+
+        # Always include fast tier
+        add_tier("fast")
+
+        # Add reasoning for medium+
+        if complexity >= 0.3:
+            add_tier("reasoning")
+
+        # Add frontier for hard+
+        if complexity >= 0.6:
+            add_tier("frontier")
+
+        # Add specialists based on category
+        cat_lower = category.lower()
+        if "code" in cat_lower or "debug" in cat_lower:
+            add_tier("code")
+        elif "math" in cat_lower or "analyze" in cat_lower:
+            add_tier("math")
+
+        # For critical tasks, add more from each tier
+        if complexity >= 0.8:
+            for pool_key in self._RACE_POOL:
+                add_tier(pool_key, max_per_family=3)
+
+        # Cap at max_candidates
+        return candidates[:max_candidates]
+
     def race_cloud(
         self,
         prompt: str,
@@ -608,7 +715,7 @@ class Cortex:
         if or_backend is None or not or_backend.api_key:
             return None
 
-        models = candidates or self._RACE_CANDIDATES
+        models = candidates or self.select_candidates(prompt)
         api_key = or_backend.api_key
         results: dict[str, str] = {}
         timings: dict[str, float] = {}
