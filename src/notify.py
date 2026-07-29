@@ -176,15 +176,16 @@ def notify(title: str, body: str) -> None:
     )
 
 
-def boot_announce(models_loaded: int = 0, max_tier: str = "?") -> None:
+def boot_announce(models_loaded: int = 0, max_tier: str = "?", cloud_available: bool = False) -> None:
     """
     Full boot announcement sequence:
     1. macOS notification
     2. Speech: "Cortex online"  
     3. Morse: "CX" (short identifier)
     """
-    notify("Cortex", f"Daemon online — {models_loaded} models, max tier {max_tier}")
-    speak(f"Cortex online. {models_loaded} models loaded. Max tier {max_tier}.", blocking=True)
+    cloud_note = " Cloud L7 available." if cloud_available else ""
+    notify("Cortex", f"Daemon online — {models_loaded} models, max local tier {max_tier}{cloud_note}")
+    speak(f"Cortex online. {models_loaded} models loaded. Max local tier {max_tier}.{cloud_note}", blocking=True)
     morse_beep("CX")
 
 

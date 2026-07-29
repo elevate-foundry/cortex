@@ -68,6 +68,14 @@ class CompletionResponse:
     tokens_generated: int = 0
     finish_reason: str = ""
     raw: Optional[dict] = None     # raw response for debugging
+    # Token usage (extracted from API response)
+    tokens_prompt: int = 0         # input tokens
+    tokens_completion: int = 0     # output tokens
+    tokens_cached: int = 0         # prompt cache hits
+    tokens_reasoning: int = 0      # internal reasoning tokens (R1, o3, etc.)
+    # Cost (from OpenRouter / provider)
+    cost_usd: float = 0.0          # actual cost for this request
+    provider: str = ""             # upstream provider (e.g. "Together", "Fireworks")
 
 
 @dataclass
@@ -186,13 +194,35 @@ class BackendAdapter:
         resp_model = body.get("model", model)
         finish = msg.get("finish_reason", choice.get("finish_reason", "stop"))
 
+        # Extract usage telemetry
+        usage = body.get("usage", {})
+        tokens_prompt = usage.get("prompt_tokens", 0) or 0
+        tokens_completion = usage.get("completion_tokens", 0) or 0
+        tokens_cached = 0
+        tokens_reasoning = 0
+        prompt_details = usage.get("prompt_tokens_details", {})
+        if prompt_details:
+            tokens_cached = prompt_details.get("cached_tokens", 0) or 0
+        completion_details = usage.get("completion_tokens_details", {})
+        if completion_details:
+            tokens_reasoning = completion_details.get("reasoning_tokens", 0) or 0
+        cost_usd = float(usage.get("cost", 0) or 0)
+        provider = body.get("provider", "")
+
         return CompletionResponse(
             content=content,
             model=resp_model,
             backend=self.backend,
             total_ms=total_ms,
+            tokens_generated=tokens_completion,
             finish_reason=finish,
             raw=body,
+            tokens_prompt=tokens_prompt,
+            tokens_completion=tokens_completion,
+            tokens_cached=tokens_cached,
+            tokens_reasoning=tokens_reasoning,
+            cost_usd=cost_usd,
+            provider=provider,
         )
 
     # ------------------------------------------------------------------
@@ -255,13 +285,35 @@ class BackendAdapter:
         resp_model = body.get("model", model)
         finish = msg.get("finish_reason", choice.get("finish_reason", "stop"))
 
+        # Extract usage telemetry
+        usage = body.get("usage", {})
+        tokens_prompt = usage.get("prompt_tokens", 0) or 0
+        tokens_completion = usage.get("completion_tokens", 0) or 0
+        tokens_cached = 0
+        tokens_reasoning = 0
+        prompt_details = usage.get("prompt_tokens_details", {})
+        if prompt_details:
+            tokens_cached = prompt_details.get("cached_tokens", 0) or 0
+        completion_details = usage.get("completion_tokens_details", {})
+        if completion_details:
+            tokens_reasoning = completion_details.get("reasoning_tokens", 0) or 0
+        cost_usd = float(usage.get("cost", 0) or 0)
+        provider = body.get("provider", "")
+
         return CompletionResponse(
             content=content,
             model=resp_model,
             backend=self.backend,
             total_ms=total_ms,
+            tokens_generated=tokens_completion,
             finish_reason=finish,
             raw=body,
+            tokens_prompt=tokens_prompt,
+            tokens_completion=tokens_completion,
+            tokens_cached=tokens_cached,
+            tokens_reasoning=tokens_reasoning,
+            cost_usd=cost_usd,
+            provider=provider,
         )
 
     # ------------------------------------------------------------------

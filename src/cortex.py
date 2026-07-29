@@ -17,7 +17,7 @@ It handles the full escalation path:
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from .backend_adapter import (
     BackendAdapter,
@@ -478,6 +478,62 @@ class Cortex:
         model = self._TIER_CLOUD_MODELS.get(tier, "qwen/qwen3-8b")
         or_backend.default_model = model
         return or_backend
+
+    # ------------------------------------------------------------------
+    # Racing models — TTFT = min(all candidates)
+    # ------------------------------------------------------------------
+
+    # Models eligible for racing at L7 (diverse providers for best TTFT)
+    _RACE_CANDIDATES = [
+        "openai/gpt-4o-mini",
+        "google/gemini-2.0-flash-001",
+        "mistralai/mistral-small-24b-instruct-2501",
+        "qwen/qwen3-coder",
+        "deepseek/deepseek-chat-v3-0324",
+    ]
+
+    def race_cloud(
+        self,
+        prompt: str,
+        max_tokens: int = 1024,
+        temperature: float = 0.2,
+        on_token: Optional[Callable] = None,
+        on_winner: Optional[Callable] = None,
+        on_complete: Optional[Callable] = None,
+        candidates: Optional[list[str]] = None,
+    ) -> Optional[tuple[str, str]]:
+        """
+        Race multiple cloud models, stream from the fastest responder.
+
+        TTFT = min(TTFT across all candidates).
+        Cortex is faster than any single model because she races them all.
+
+        Returns (winner_model_id, full_content) or None.
+        """
+        from .ckm.aimd_dispatch import AIMDDispatcher, race_models_stream
+
+        if self._pool is None:
+            return None
+        or_backend = self._pool.get_backend(BackendType.OPENROUTER)
+        if or_backend is None or not or_backend.api_key:
+            return None
+
+        dispatcher = AIMDDispatcher(
+            initial_parallelism=len(candidates or self._RACE_CANDIDATES),
+            max_parallelism=12,
+        )
+
+        return race_models_stream(
+            prompt=prompt,
+            model_ids=candidates or self._RACE_CANDIDATES,
+            api_key=or_backend.api_key,
+            dispatcher=dispatcher,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            on_token=on_token,
+            on_winner=on_winner,
+            on_complete=on_complete,
+        )
 
     # ------------------------------------------------------------------
     # Streaming support

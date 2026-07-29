@@ -29,6 +29,7 @@ class TaskCategory(str, Enum):
     ANALYZE = "analyze"           # deep analysis / reasoning
     GENERATE = "generate"         # long-form content generation
     SAFETY = "safety"             # safety-critical decision
+    VISION = "vision"             # image/multimodal understanding
     UNKNOWN = "unknown"
 
 
@@ -167,6 +168,7 @@ _CATEGORY_MIN_TIER: dict[TaskCategory, Tier] = {
     TaskCategory.PLAN:       Tier.L3,
     TaskCategory.ANALYZE:    Tier.L3,
     TaskCategory.SAFETY:     Tier.L4,
+    TaskCategory.VISION:     Tier.L7,  # Vision requires GPT-4o (frontier API)
     TaskCategory.UNKNOWN:    Tier.L2,
 }
 
@@ -240,6 +242,59 @@ def route_heuristic(
         reason=", ".join(reason_parts),
         escalation_hint=Tier.L7 if escalation else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Vision / multimodal detection
+# ---------------------------------------------------------------------------
+
+def _has_vision_content(messages: list[dict]) -> bool:
+    """Check if any message contains image content (multimodal)."""
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                ptype = part.get("type", "")
+                if ptype in ("image_url", "input_image"):
+                    return True
+    return False
+
+
+def route_heuristic_messages(
+    messages: list[dict],
+    max_tier: Tier = Tier.L6,
+    available_tiers: Optional[list[Tier]] = None,
+) -> RouteDecision:
+    """
+    Route based on full message array — detects vision/multimodal content.
+
+    If images are present, routes directly to L7 (GPT-4o) for vision.
+    Otherwise falls through to text-only heuristic routing.
+    """
+    if _has_vision_content(messages):
+        tier = Tier.L7
+        # Clamp if L7 not available
+        if available_tiers and tier not in available_tiers:
+            feasible = [t for t in available_tiers if t >= Tier.L5]
+            tier = min(feasible) if feasible else (max(available_tiers) if available_tiers else Tier.L7)
+        return RouteDecision(
+            tier=tier,
+            category=TaskCategory.VISION,
+            confidence=0.95,
+            reason="multimodal: image content detected → GPT-4o vision",
+            escalation_hint=Tier.L7 if tier < Tier.L7 else None,
+        )
+
+    # Text-only: extract prompt and use standard routing
+    prompt = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                prompt = content
+            break
+
+    return route_heuristic(prompt, max_tier, available_tiers)
 
 
 # ---------------------------------------------------------------------------
