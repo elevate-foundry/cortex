@@ -17,7 +17,7 @@ It handles the full escalation path:
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .backend_adapter import (
     BackendAdapter,
@@ -397,6 +397,7 @@ class Cortex:
         model: str,
         max_tokens: int = 512,
         tools: Optional[list[dict]] = None,
+        tool_choice: Any = None,
     ) -> CortexResponse:
         """
         Process a request targeting a specific model (bypass routing).
@@ -439,6 +440,7 @@ class Cortex:
             max_tokens=gen_tokens,
             temperature=0.0,
             tools=tools,
+            tool_choice=tool_choice,
         )
 
         try:
