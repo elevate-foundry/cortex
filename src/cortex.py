@@ -104,7 +104,19 @@ class Cortex:
         )
         self.swarm = Swarm(self.manager)
 
-        self._max_tier = max_feasible_tier(self.profile)
+        raw_max = max_feasible_tier(self.profile)
+        # Memory-pressure guard: on machines with <= 16 GB unified RAM,
+        # cap at L2 (4B model) to avoid thrashing. Hard problems use cloud
+        # consensus race instead of loading huge local models.
+        if self.profile.total_vram_mb <= 16384 and raw_max.value > Tier.L2.value:
+            self._max_tier = Tier.L2
+            logger.info(
+                f"Memory guard: capping local tier at L2 "
+                f"(machine has {self.profile.total_vram_mb}MB, "
+                f"would need L4+ for {raw_max.name})"
+            )
+        else:
+            self._max_tier = raw_max
         self._booted = False
         self._pool: Optional[BackendPool] = None
         self._tier_map: Optional[TierMap] = None
