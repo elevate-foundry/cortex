@@ -302,6 +302,10 @@ class DaemonServer:
                 await self._handle_gossip_state(writer)
             elif path == "/v1/gossip/stats" and method == "GET":
                 await self._handle_gossip_stats(writer)
+            elif path == "/v1/backends" and method == "GET":
+                await self._handle_backends(writer)
+            elif path == "/v1/usage/cost" and method == "GET":
+                await self._handle_usage_cost(writer)
             elif path == "/boot-trace" and method == "GET":
                 await self._handle_boot_trace(writer)
             elif path == "/lifecycle" and method == "GET":
@@ -1090,6 +1094,85 @@ class DaemonServer:
             "message": f"Discovered {census['total_unique_models']} models across {census['total_families']} families",
             "census": census,
         })
+
+    async def _handle_backends(self, writer):
+        """GET /v1/backends — list all available backends and their status."""
+        backends = []
+        if self.cortex._pool:
+            for adapter in self.cortex._pool.backends:
+                backends.append({
+                    "type": adapter.backend.value,
+                    "base_url": adapter.base_url,
+                    "default_model": adapter.default_model,
+                    "available": True,
+                })
+        # Add tier map info
+        tier_map_info = {}
+        if self.cortex._tier_map and not self.cortex._tier_map.empty:
+            tier_map_info = {
+                "timestamp": self.cortex._tier_map.timestamp,
+                "models": self.cortex._tier_map.all_models(),
+                "source": self.cortex._tier_map.source_path,
+            }
+            # Convert Tier enums to strings
+            tier_map_info["models"] = {k: v.name for k, v in tier_map_info["models"].items()}
+
+        await self._send_json(writer, 200, {
+            "backends": backends,
+            "primary": self.cortex._pool.primary.backend.value if (self.cortex._pool and self.cortex._pool.primary) else None,
+            "tier_map": tier_map_info,
+        })
+
+    async def _handle_usage_cost(self, writer):
+        """GET /v1/usage/cost — aggregate cost/token usage from audit log."""
+        try:
+            with self.memory._tx() as c:
+                # Daily totals
+                c.execute("""
+                    SELECT date_str, tier, model,
+                           request_count, tokens_prompt, tokens_completion,
+                           total_latency_ms, error_count
+                    FROM usage_daily
+                    ORDER BY date_str DESC
+                    LIMIT 30
+                """)
+                rows = c.fetchall()
+                daily = []
+                for row in rows:
+                    daily.append({
+                        "date": row[0], "tier": row[1], "model": row[2],
+                        "requests": row[3], "tokens_prompt": row[4],
+                        "tokens_completion": row[5],
+                        "avg_latency_ms": round(row[6] / max(row[3], 1), 1),
+                        "errors": row[7],
+                    })
+
+                # Total cost from audit log
+                c.execute("""
+                    SELECT 
+                        COUNT(*) as total_requests,
+                        SUM(tokens_prompt) as total_prompt,
+                        SUM(tokens_completion) as total_completion,
+                        SUM(cost_usd) as total_cost,
+                        AVG(latency_ms) as avg_latency
+                    FROM audit_log
+                """)
+                totals = c.fetchone()
+
+            await self._send_json(writer, 200, {
+                "totals": {
+                    "requests": totals[0] or 0,
+                    "tokens_prompt": totals[1] or 0,
+                    "tokens_completion": totals[2] or 0,
+                    "cost_usd": round(totals[3] or 0, 6),
+                    "avg_latency_ms": round(totals[4] or 0, 1),
+                },
+                "daily": daily,
+            })
+        except Exception as e:
+            await self._send_json(writer, 500, {
+                "error": {"message": f"Usage query failed: {e}", "type": "server_error"}
+            })
 
     async def _handle_tools_list(self, writer):
         """GET /v1/tools — list all registered tools."""

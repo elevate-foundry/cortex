@@ -33,6 +33,7 @@ from .swarm import Swarm, SwarmResult, SwarmSize, AggregationMethod
 from .tiers import Tier, TIER_SPECS, assess_tiers, max_feasible_tier
 from .hardware_detect import SystemProfile, detect_system
 from .memory import Memory
+from .tier_map import TierMap
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ class Cortex:
         self._max_tier = max_feasible_tier(self.profile)
         self._booted = False
         self._pool: Optional[BackendPool] = None
+        self._tier_map: Optional[TierMap] = None
 
     def boot(self) -> None:
         """
@@ -121,6 +123,11 @@ class Cortex:
             logger.info("Cloud backends available: %s", self._pool.summary())
         else:
             logger.info("No cloud backends — local only mode")
+
+        # Load tier election results (model → tier mapping)
+        self._tier_map = TierMap.load()
+        if not self._tier_map.empty:
+            logger.info("TierMap: %s", self._tier_map.summary())
 
         self._booted = True
         logger.info(f"Cortex ready. Max local tier: {self._max_tier.name}")
@@ -493,8 +500,12 @@ class Cortex:
         if or_backend is None:
             return None
 
-        # Set the model to match the requested tier
-        model = self._TIER_CLOUD_MODELS.get(tier, "qwen/qwen3-8b")
+        # Use TierMap (election data) if available, else hardcoded defaults
+        hardcoded = self._TIER_CLOUD_MODELS.get(tier, "qwen/qwen3-8b")
+        if self._tier_map and not self._tier_map.empty:
+            model = self._tier_map.cloud_model_for_tier(tier, fallback=hardcoded)
+        else:
+            model = hardcoded
         or_backend.default_model = model
         return or_backend
 
