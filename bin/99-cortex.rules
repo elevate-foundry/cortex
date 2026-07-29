@@ -1,0 +1,10 @@
+# udev rule for auto-starting Cortex when the USB drive mounts (Linux)
+#
+# Install:
+#   sudo cp 99-cortex.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#
+# This triggers the mount watcher when a drive labeled "CORTEX" is inserted.
+# The mount watcher handles the rest (lifecycle wake, daemon start, TTS).
+
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="CORTEX", RUN+="/bin/bash -c '/media/%E{ID_FS_LABEL}/cortex/bin/cortex-mount-watcher.sh &'"
