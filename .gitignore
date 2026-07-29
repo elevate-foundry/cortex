@@ -23,3 +23,4 @@ data/distill/*.jsonl
 models/*.bin
 models/*.gguf
 models/*.ctf
+bin/.env

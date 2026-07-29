@@ -40,6 +40,8 @@ class BackendType(str, Enum):
     LLAMA_CPP = "llama_cpp"
     VLLM = "vllm"
     OPENAI_API = "openai_api"      # OpenAI, Anthropic via OpenAI-compat, etc.
+    OPENROUTER = "openrouter"      # OpenRouter — multi-model proxy
+    MODAL = "modal"                # Modal (Salus profile) — cloud GPU
 
 
 @dataclass
@@ -106,6 +108,9 @@ class BackendAdapter:
         h = {"Content-Type": "application/json"}
         if self.api_key:
             h["Authorization"] = f"Bearer {self.api_key}"
+        if self.backend == BackendType.OPENROUTER:
+            h["HTTP-Referer"] = "https://github.com/elevate-foundry/cortex"
+            h["X-Title"] = "Cortex"
         return h
 
     def _completions_url(self) -> str:
@@ -169,13 +174,13 @@ class BackendAdapter:
         # Parse response — unified OpenAI-compatible format (all backends)
         choice = body.get("choices", [{}])[0]
         msg = choice.get("message", {})
-        content = msg.get("content", "")
+        content = msg.get("content") or ""
         if not content.strip():
-            reasoning = msg.get("reasoning", "") or msg.get("thinking", "")
+            reasoning = msg.get("reasoning") or msg.get("thinking") or ""
             if reasoning:
                 content = reasoning
             else:
-                refusal = msg.get("refusal", "")
+                refusal = msg.get("refusal") or ""
                 if refusal:
                     content = f"Refusal: {refusal}"
         resp_model = body.get("model", model)
@@ -238,13 +243,13 @@ class BackendAdapter:
 
         choice = body.get("choices", [{}])[0]
         msg = choice.get("message", {})
-        content = msg.get("content", "")
+        content = msg.get("content") or ""
         if not content.strip():
-            reasoning = msg.get("reasoning", "") or msg.get("thinking", "")
+            reasoning = msg.get("reasoning") or msg.get("thinking") or ""
             if reasoning:
                 content = reasoning
             else:
-                refusal = msg.get("refusal", "")
+                refusal = msg.get("refusal") or ""
                 if refusal:
                     content = f"Refusal: {refusal}"
         resp_model = body.get("model", model)
@@ -388,3 +393,261 @@ def openai_adapter(
         api_key=api_key or os.environ.get("OPENAI_API_KEY", ""),
         default_model=model,
     )
+
+
+def openrouter_adapter(
+    model: str = "qwen/qwen3-8b",
+    api_key: str = "",
+) -> BackendAdapter:
+    """Create an adapter for OpenRouter (multi-model cloud proxy)."""
+    key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+    if not key:
+        # Try loading from bin/.env on the drive
+        from pathlib import Path
+        env_path = Path("/Volumes/CORTEX/cortex/bin/.env")
+        if env_path.exists():
+            for line in env_path.read_text().strip().split("\n"):
+                if line.startswith("OPENROUTER_API_KEY="):
+                    key = line.split("=", 1)[1].strip()
+                    break
+    return BackendAdapter(
+        backend=BackendType.OPENROUTER,
+        base_url="https://openrouter.ai/api",
+        api_key=key,
+        default_model=model,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-backend orchestrator
+# ---------------------------------------------------------------------------
+
+class BackendPool:
+    """
+    Manages multiple backends with automatic discovery and fallback.
+
+    Priority order:
+      1. Ollama (local, free, fast)
+      2. llama.cpp (local, free, fast)
+      3. vLLM (local or remote, fast)
+      4. OpenRouter (cloud, cheap, wide model coverage)
+      5. OpenAI/Anthropic (cloud, expensive, last resort)
+
+    Usage:
+      pool = BackendPool.auto_discover()
+      response = await pool.complete(request)
+    """
+
+    def __init__(self):
+        self.backends: list[BackendAdapter] = []
+        self._primary: Optional[BackendAdapter] = None
+
+    @classmethod
+    def auto_discover(cls) -> "BackendPool":
+        """
+        Probe for available backends and create a pool.
+
+        Checks:
+          - Ollama at localhost:11434 (default)
+          - llama.cpp at localhost:8080
+          - vLLM at localhost:8000
+          - OpenRouter if OPENROUTER_API_KEY is set
+          - OpenAI if OPENAI_API_KEY is set
+        """
+        import logging
+        logger = logging.getLogger("cortex.backend_pool")
+
+        pool = cls()
+
+        # Ollama
+        ollama = ollama_adapter()
+        if ollama.health_check():
+            pool.backends.append(ollama)
+            logger.info("Backend discovered: Ollama at %s", ollama.base_url)
+
+        # llama.cpp
+        lcpp = llama_cpp_adapter()
+        if lcpp.health_check():
+            pool.backends.append(lcpp)
+            logger.info("Backend discovered: llama.cpp at %s", lcpp.base_url)
+
+        # vLLM
+        vllm = vllm_adapter()
+        if vllm.health_check():
+            pool.backends.append(vllm)
+            logger.info("Backend discovered: vLLM at %s", vllm.base_url)
+
+        # OpenRouter (always available if key exists)
+        or_adapter = openrouter_adapter()
+        if or_adapter.api_key:
+            pool.backends.append(or_adapter)
+            logger.info("Backend discovered: OpenRouter (API key present)")
+
+        # OpenAI (if key exists)
+        oai_key = os.environ.get("OPENAI_API_KEY", "")
+        if oai_key and oai_key != "local":
+            pool.backends.append(openai_adapter(api_key=oai_key))
+            logger.info("Backend discovered: OpenAI API")
+
+        if pool.backends:
+            pool._primary = pool.backends[0]
+            logger.info("Primary backend: %s", pool._primary.backend.value)
+        else:
+            logger.warning("No backends discovered!")
+
+        return pool
+
+    @property
+    def primary(self) -> Optional[BackendAdapter]:
+        return self._primary
+
+    @property
+    def available(self) -> bool:
+        return len(self.backends) > 0
+
+    def get_backend(self, backend_type: BackendType) -> Optional[BackendAdapter]:
+        """Get a specific backend by type."""
+        for b in self.backends:
+            if b.backend == backend_type:
+                return b
+        return None
+
+    def get_backend_for_model(self, model: str) -> Optional[BackendAdapter]:
+        """
+        Find the best backend for a given model.
+
+        Logic:
+          - If model looks like an OpenRouter ID (org/name), use OpenRouter
+          - If model is a local name (no slash, or ollama tag format), use Ollama
+          - Otherwise use primary
+        """
+        if "/" in model and not model.startswith("http"):
+            # Looks like org/model format (OpenRouter, HuggingFace)
+            or_backend = self.get_backend(BackendType.OPENROUTER)
+            if or_backend:
+                return or_backend
+        # Local model name — try Ollama first
+        ollama_backend = self.get_backend(BackendType.OLLAMA)
+        if ollama_backend:
+            return ollama_backend
+        return self._primary
+
+    async def complete(
+        self, req: CompletionRequest, preferred_backend: Optional[BackendType] = None
+    ) -> CompletionResponse:
+        """
+        Complete a request using the best available backend.
+
+        Tries preferred_backend first, then falls back through the pool.
+        """
+        # Pick starting backend
+        if preferred_backend:
+            backend = self.get_backend(preferred_backend)
+            if backend:
+                try:
+                    return await backend.complete(req)
+                except Exception:
+                    pass  # Fall through to others
+
+        # Route by model name
+        if req.model:
+            backend = self.get_backend_for_model(req.model)
+            if backend:
+                try:
+                    return await backend.complete(req)
+                except Exception:
+                    pass
+
+        # Fallback chain
+        last_error = None
+        for backend in self.backends:
+            try:
+                return await backend.complete(req)
+            except Exception as e:
+                last_error = e
+                continue
+
+        raise ConnectionError(
+            f"All backends failed. Last error: {last_error}"
+        )
+
+    async def complete_streaming(
+        self, req: CompletionRequest, preferred_backend: Optional[BackendType] = None
+    ) -> AsyncIterator[str]:
+        """
+        Stream a completion response as SSE chunks.
+
+        Yields: SSE-formatted data lines ("data: {...}\n\n")
+        """
+        # Force streaming in request
+        req.stream = True
+
+        # Pick backend
+        backend = None
+        if preferred_backend:
+            backend = self.get_backend(preferred_backend)
+        if not backend and req.model:
+            backend = self.get_backend_for_model(req.model)
+        if not backend:
+            backend = self._primary
+        if not backend:
+            raise ConnectionError("No backends available")
+
+        # Stream via aiohttp
+        if not HAS_AIOHTTP:
+            raise RuntimeError("aiohttp required for streaming")
+
+        model = req.model or backend.default_model
+        payload = {
+            "model": model,
+            "messages": req.messages,
+            "max_tokens": req.max_tokens,
+            "temperature": req.temperature,
+            "stream": True,
+        }
+        if req.stop:
+            payload["stop"] = req.stop
+        if req.tools:
+            payload["tools"] = req.tools
+
+        headers = {"Content-Type": "application/json"}
+        if backend.api_key:
+            headers["Authorization"] = f"Bearer {backend.api_key}"
+        # OpenRouter extras
+        if backend.backend == BackendType.OPENROUTER:
+            headers["HTTP-Referer"] = "https://github.com/elevate-foundry/cortex"
+            headers["X-Title"] = "Cortex"
+
+        url = backend._completions_url()
+        timeout = aiohttp.ClientTimeout(total=backend.timeout_s)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    error_body = await resp.text()
+                    raise RuntimeError(
+                        f"Backend {backend.backend.value} returned {resp.status}: {error_body}"
+                    )
+                async for line in resp.content:
+                    decoded = line.decode("utf-8", errors="replace").strip()
+                    if decoded.startswith("data: "):
+                        yield decoded + "\n\n"
+                    elif decoded == "data: [DONE]":
+                        yield "data: [DONE]\n\n"
+                        break
+
+    def summary(self) -> dict:
+        """Return a summary of available backends."""
+        return {
+            "backends": [
+                {
+                    "type": b.backend.value,
+                    "url": b.base_url,
+                    "model": b.default_model,
+                    "is_primary": b is self._primary,
+                }
+                for b in self.backends
+            ],
+            "primary": self._primary.backend.value if self._primary else None,
+            "count": len(self.backends),
+        }

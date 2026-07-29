@@ -21,13 +21,14 @@ from typing import Optional
 
 from .backend_adapter import (
     BackendAdapter,
+    BackendPool,
     BackendType,
     CompletionRequest,
     CompletionResponse,
 )
 from .challenger import Challenger, ChallengeResult, AgreementLevel
 from .model_manager import ModelManager, ManagerConfig, ModelState
-from .router import RouteDecision, route_heuristic, route_with_model
+from .router import RouteDecision, TaskCategory, route_heuristic, route_heuristic_messages, route_with_model
 from .swarm import Swarm, SwarmResult, SwarmSize, AggregationMethod
 from .tiers import Tier, TIER_SPECS, assess_tiers, max_feasible_tier
 from .hardware_detect import SystemProfile, detect_system
@@ -97,6 +98,7 @@ class Cortex:
 
         self._max_tier = max_feasible_tier(self.profile)
         self._booted = False
+        self._pool: Optional[BackendPool] = None
 
     def boot(self) -> None:
         """
@@ -105,6 +107,14 @@ class Cortex:
         """
         logger.info("=== Cortex Boot ===")
         self.manager.boot()
+
+        # Discover cloud backends (OpenRouter, etc.) as fallback
+        self._pool = BackendPool.auto_discover()
+        if self._pool.available:
+            logger.info("Cloud backends available: %s", self._pool.summary())
+        else:
+            logger.info("No cloud backends — local only mode")
+
         self._booted = True
         logger.info(f"Cortex ready. Max local tier: {self._max_tier.name}")
 
@@ -131,15 +141,22 @@ class Cortex:
         # Ensure a minimum budget so the model can produce visible output.
         gen_tokens = max(max_tokens, 256)
 
-        # Extract the user prompt for routing
+        # --- Step 1: Route (vision-aware) ---
+        # Check for multimodal content first — routes to GPT-4o for vision
+        route = route_heuristic_messages(messages, self._max_tier,
+                    [a.tier for a in assess_tiers(self.profile) if a.feasible])
+
+        # Extract text prompt for logging/downstream
         prompt = ""
         for msg in reversed(messages):
             if msg.get("role") == "user":
-                prompt = msg.get("content", "")
+                c = msg.get("content", "")
+                prompt = c if isinstance(c, str) else "[multimodal]"
                 break
 
-        # --- Step 1: Route ---
-        route = self._route(prompt)
+        # If not vision, refine with model-based routing when available
+        if route.category != TaskCategory.VISION:
+            route = self._route(prompt)
         tier = route.tier
         escalation_path.append(f"route→{tier.name}(conf={route.confidence:.2f})")
 
@@ -304,7 +321,10 @@ class Cortex:
                     continue
 
         if adapter is None:
-            return None
+            # Final fallback: use cloud backend pool (OpenRouter)
+            adapter = self._get_cloud_fallback(tier)
+            if adapter is None:
+                return None
 
         # For reflex tiers (L0-L2), suppress Qwen3 thinking mode to save
         # tokens and reduce latency — these are fast lookups, not reasoning.
@@ -346,6 +366,118 @@ class Cortex:
             if resp is not None:
                 return tier, resp
         return current_tier, None
+
+    # ------------------------------------------------------------------
+    # Explicit model override (bypass routing)
+    # ------------------------------------------------------------------
+
+    def process_with_model(
+        self,
+        messages: list[dict],
+        model: str,
+        max_tokens: int = 512,
+        tools: Optional[list[dict]] = None,
+    ) -> CortexResponse:
+        """
+        Process a request targeting a specific model (bypass routing).
+
+        Used when the user explicitly sets a model in the request.
+        Routes directly to the appropriate backend for that model.
+        """
+        if not self._booted:
+            self.boot()
+
+        t0 = time.monotonic()
+        gen_tokens = max(max_tokens, 256)
+
+        # Determine which backend has this model
+        adapter = None
+        if self._pool:
+            adapter = self._pool.get_backend_for_model(model)
+        if adapter is None:
+            # Try local
+            adapter = self.manager.get_adapter_by_model(model)
+        if adapter is None:
+            # Last resort: try primary
+            if self._pool and self._pool.primary:
+                adapter = self._pool.primary
+
+        if adapter is None:
+            return CortexResponse(
+                content=f"Model '{model}' is not available on any backend.",
+                tier_used=Tier.L0,
+                model_used="none",
+                confidence=0.0,
+                route_decision=route_heuristic("", max_tier=self._max_tier),
+                total_ms=(time.monotonic() - t0) * 1000,
+            )
+
+        # Build request
+        req = CompletionRequest(
+            messages=messages,
+            model=model,
+            max_tokens=gen_tokens,
+            temperature=0.0,
+            tools=tools,
+        )
+
+        try:
+            resp = adapter.complete_sync(req)
+        except Exception as e:
+            logger.error(f"Explicit model request failed ({model}): {e}")
+            return CortexResponse(
+                content=f"Backend error for model '{model}': {e}",
+                tier_used=Tier.L7,
+                model_used=model,
+                confidence=0.0,
+                route_decision=route_heuristic("", max_tier=self._max_tier),
+                total_ms=(time.monotonic() - t0) * 1000,
+            )
+
+        total_ms = (time.monotonic() - t0) * 1000
+        return CortexResponse(
+            content=resp.content,
+            tier_used=Tier.L7,  # explicit model = unclassified tier
+            model_used=resp.model,
+            confidence=1.0,
+            route_decision=route_heuristic("", max_tier=self._max_tier),
+            escalation_path=[f"explicit_model→{model}"],
+            total_ms=total_ms,
+            raw_response=resp.raw,
+        )
+
+    # ------------------------------------------------------------------
+    # Cloud fallback
+    # ------------------------------------------------------------------
+
+    # Tier → recommended OpenRouter model
+    _TIER_CLOUD_MODELS = {
+        Tier.L0: "qwen/qwen3-1.7b",
+        Tier.L1: "qwen/qwen3-1.7b",
+        Tier.L2: "qwen/qwen3-4b",
+        Tier.L3: "qwen/qwen3-8b",
+        Tier.L4: "microsoft/phi-4",
+        Tier.L5: "qwen/qwen3-32b",
+        Tier.L6: "meta-llama/llama-3.3-70b-instruct",
+        Tier.L7: "openai/gpt-4o",  # Frontier: vision + reasoning
+    }
+
+    # Designated vision model — GPT-4o is best-in-class for multimodal
+    _VISION_MODEL = "openai/gpt-4o"
+
+    def _get_cloud_fallback(self, tier: Tier) -> Optional[BackendAdapter]:
+        """Get a cloud backend adapter configured for the appropriate tier."""
+        if self._pool is None or not self._pool.available:
+            return None
+
+        or_backend = self._pool.get_backend(BackendType.OPENROUTER)
+        if or_backend is None:
+            return None
+
+        # Set the model to match the requested tier
+        model = self._TIER_CLOUD_MODELS.get(tier, "qwen/qwen3-8b")
+        or_backend.default_model = model
+        return or_backend
 
     # ------------------------------------------------------------------
     # Streaming support
@@ -394,6 +526,10 @@ class Cortex:
                 if adapter is not None:
                     tier = fallback_tier
                     break
+
+        # Final fallback: cloud backend pool
+        if adapter is None:
+            adapter = self._get_cloud_fallback(tier)
 
         model_tag = adapter.default_model if adapter else ""
         return route, tier, adapter, model_tag

@@ -312,6 +312,18 @@ class ModelManager:
                 return lm.adapter
         return None
 
+    def get_adapter_by_model(self, model_id: str) -> Optional[BackendAdapter]:
+        """Get the adapter for a specific loaded model by its ID."""
+        for key, lm in self._loaded.items():
+            if lm.state == ModelState.READY:
+                if (lm.model.model_id == model_id
+                        or lm.model.ollama_tag == model_id
+                        or key == model_id):
+                    lm.last_used = time.monotonic()
+                    lm.request_count += 1
+                    return lm.adapter
+        return None
+
     def get_challenge_adapter(
         self,
         tier: Tier,

@@ -169,7 +169,8 @@ class DaemonServer:
             from .notify import boot_announce
             max_t = str(max_feasible_tier(self.profile).name)
             n_models = len(mgr_status.get("models", []))
-            boot_announce(models_loaded=n_models, max_tier=max_t)
+            has_cloud = bool(os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY"))
+            boot_announce(models_loaded=n_models, max_tier=max_t, cloud_available=has_cloud)
         except Exception as e:
             logger.debug("Boot announce skipped: %s", e)
 
@@ -629,16 +630,30 @@ class DaemonServer:
         tool_rounds = 0
         all_rounds: list = []
 
+        # Determine if this is an explicit model request
+        explicit_model = normalized.model if (normalized.model and "/" in normalized.model) else ""
+
         for _ in range(max_rounds):
             loop = asyncio.get_event_loop()
-            cortex_resp = await loop.run_in_executor(
-                None,
-                lambda: self.cortex.process(
-                    current_messages,
-                    max_tokens=normalized.max_tokens,
-                    tools=normalized.tools,
-                ),
-            )
+            if explicit_model:
+                cortex_resp = await loop.run_in_executor(
+                    None,
+                    lambda: self.cortex.process_with_model(
+                        current_messages,
+                        model=explicit_model,
+                        max_tokens=normalized.max_tokens,
+                        tools=normalized.tools,
+                    ),
+                )
+            else:
+                cortex_resp = await loop.run_in_executor(
+                    None,
+                    lambda: self.cortex.process(
+                        current_messages,
+                        max_tokens=normalized.max_tokens,
+                        tools=normalized.tools,
+                    ),
+                )
             final_cortex_resp = cortex_resp
 
             if not cortex_resp or not cortex_resp.raw_response:

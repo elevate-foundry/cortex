@@ -1,6 +1,7 @@
 # Cortex runtime dependencies
 # Core (required for daemon + inference routing)
 aiohttp>=3.9.0
+httpx>=0.27.0
 
 # Optional: CKM self-training (only needed for `cortex train`)
 # torch>=2.1.0
