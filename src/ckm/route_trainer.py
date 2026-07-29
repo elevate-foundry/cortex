@@ -294,18 +294,28 @@ def _model_to_tier(model_id: str) -> str:
 def _guess_category(prompt: str) -> str:
     """Quick heuristic category from prompt text."""
     p = prompt.lower()
-    if any(w in p for w in ["code", "function", "implement", "class", "def "]):
+    if any(w in p for w in ["code", "function", "implement", "class ", "def ", "write a ",
+                             "script", "regex", "decorator", "trie", "sort", "stack", "queue"]):
         return "code"
-    if any(w in p for w in ["debug", "fix", "error", "bug"]):
+    if any(w in p for w in ["debug", "fix", "error", "bug", "wrong", "hangs", "crash",
+                             "slow", "fails", "broken"]):
         return "debug"
-    if any(w in p for w in ["explain", "analyze", "why"]):
+    if any(w in p for w in ["explain", "analyze", "compare", "difference", "why",
+                             "how does", "what is the", "implications", "tradeoff",
+                             "characteristics", "works"]):
         return "analyze"
-    if any(w in p for w in ["plan", "steps", "how to"]):
+    if any(w in p for w in ["plan", "design", "outline", "architect", "strategy",
+                             "steps to", "pipeline"]):
         return "plan"
-    if any(w in p for w in ["yes or no", "classify", "is it"]):
+    if any(w in p for w in ["yes or no", "classify", "is it", "does ", "can ",
+                             "is ", "are "]):
         return "classify"
-    if any(w in p for w in ["write", "generate", "create"]):
+    if any(w in p for w in ["write", "generate", "create", "produce", "draft"]):
         return "generate"
+    if any(w in p for w in ["safe", "ethical", "should", "autonomous"]):
+        return "safety"
+    if any(w in p for w in ["prove", "derive", "theoretical", "complexity of"]):
+        return "analyze"
     return "unknown"
 
 
