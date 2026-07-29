@@ -603,6 +603,19 @@ def main():
     dream_sub.add_parser("status", help="Show lifecycle and dream state")
     dream_sub.add_parser("run", help="Run one dream cycle manually")
 
+    # finetune-router — LoRA fine-tune Qwen3-0.6B into CortexRouter
+    p_ft = sub.add_parser("finetune-router", help="Fine-tune CortexRouter-0.6B from routing telemetry")
+    p_ft.add_argument("--data", required=True, help="Path to routing JSONL training data")
+    p_ft.add_argument("--base-model", default="Qwen/Qwen3-0.6B", help="Base model (HuggingFace ID)")
+    p_ft.add_argument("--output", default="models/cortex-router-0.6b", help="Output directory")
+    p_ft.add_argument("--epochs", type=int, default=3, help="Training epochs")
+    p_ft.add_argument("--rank", type=int, default=16, help="LoRA rank")
+    p_ft.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
+    p_ft.add_argument("--quantize", default="Q4_K_M", help="GGUF quantization type")
+    p_ft.add_argument("--no-register", action="store_true", help="Skip Ollama registration")
+    p_ft.add_argument("--export-audit", metavar="DB_PATH",
+                     help="Export audit log from DB to training JSONL first")
+
     # train — self-training loop
     p_train = sub.add_parser("train", help="Self-training loop: train, eval, promote CKM models")
     p_train.add_argument("--target", default="ckm", choices=["ckm"],
@@ -643,6 +656,7 @@ def main():
         "benchmark": cmd_benchmark,
         "scl": cmd_scl,
         "train": cmd_train,
+        "finetune-router": cmd_finetune_router,
         "sleep": cmd_sleep,
         "dream": cmd_dream,
     }
@@ -694,6 +708,55 @@ def cmd_train(args):
             argv.append("--regenerate-data")
 
     sys.exit(ckm_main(argv))
+
+
+def cmd_finetune_router(args):
+    """Fine-tune CortexRouter-0.6B from routing telemetry."""
+    from pathlib import Path
+    from .ckm.finetune_router import (
+        LoRAConfig, full_pipeline, export_audit_to_training_data
+    )
+
+    data_path = Path(args.data)
+
+    # Optionally export audit log to training data first
+    if args.export_audit:
+        audit_db = Path(args.export_audit)
+        if not audit_db.exists():
+            print(f"Error: DB not found: {audit_db}")
+            sys.exit(1)
+        data_path.parent.mkdir(parents=True, exist_ok=True)
+        count = export_audit_to_training_data(audit_db, data_path)
+        print(f"Exported {count} training samples from audit log")
+        if count == 0:
+            print("No training data — run some requests through the daemon first")
+            sys.exit(1)
+
+    if not data_path.exists():
+        print(f"Error: Training data not found: {data_path}")
+        print("Hint: Use --export-audit to generate from daemon audit log")
+        sys.exit(1)
+
+    config = LoRAConfig(
+        base_model=args.base_model,
+        output_dir=args.output,
+        epochs=args.epochs,
+        rank=args.rank,
+        learning_rate=args.lr,
+    )
+
+    result = full_pipeline(
+        data_path=data_path,
+        config=config,
+        quantization=args.quantize,
+        register=not args.no_register,
+    )
+
+    print(f"\n✓ CortexRouter-0.6B trained successfully")
+    print(f"  GGUF: {result['gguf_path']}")
+    print(f"  Ollama: {'registered' if result['registered'] else 'not registered'}")
+    if result['registered']:
+        print(f"  Run: ollama run {result['model_name']}")
 
 
 def cmd_gossip(args):

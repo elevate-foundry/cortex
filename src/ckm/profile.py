@@ -128,6 +128,21 @@ MODEL_LADDER = {
         training_minutes_cpu=90,
         training_minutes_gpu=20,
     ),
+    # --- Router models (fine-tuned, not from-scratch) ---
+    "cortex-router-0.6b": ModelSpec(
+        name="cortex-router-0.6b",
+        params=600_000_000,
+        n_layers=24,
+        d_model=1024,
+        n_heads=16,
+        d_ff=4096,
+        vocab_size=151936,       # Qwen3 tokenizer vocab
+        max_seq_len=512,         # routing decisions are short
+        estimated_ram_mb=4096,   # LoRA fine-tune on MPS
+        estimated_vram_mb=2048,  # LoRA rank=16 uses ~2GB
+        training_minutes_cpu=0,  # not trained on CPU
+        training_minutes_gpu=120,  # ~2h LoRA on M-series
+    ),
 }
 
 
