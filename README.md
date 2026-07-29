@@ -200,6 +200,7 @@ That's it. Now these all work through Cortex:
 | Tool | Works? | Notes |
 |------|--------|-------|
 | **Cursor** | ✅ | Settings → Models → OpenAI → Base URL |
+| **Pi Coder** | ✅ | Custom OpenAI-compatible provider in `models.json` |
 | **VS Code + Continue** | ✅ | Set in `config.json` |
 | **Cline** | ✅ | API provider → OpenAI Compatible |
 | **aider** | ✅ | `aider --openai-api-base http://localhost:11411/v1` |

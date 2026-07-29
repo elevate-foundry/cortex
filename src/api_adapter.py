@@ -99,15 +99,23 @@ def _normalize_chat_completions(body: dict) -> NormalizedRequest:
     """
     OpenAI Chat Completions — already the native format.
     Just extract tool-calling fields and multimodal content.
+
+    Compatibility: accepts Pi/OpenAI extensions:
+      - max_completion_tokens (alias for max_tokens)
+      - developer role (mapped to system)
+      - store field (ignored)
     """
     messages = body.get("messages", [])
-    # Normalize multimodal content blocks to text for local models
-    normalized_msgs = [_normalize_message_content(m) for m in messages]
+    # Normalize multimodal content blocks and developer role
+    normalized_msgs = [_normalize_message_content(_normalize_role(m)) for m in messages]
+
+    # Accept max_completion_tokens as alias for max_tokens (Pi/OpenAI compat)
+    max_tokens = body.get("max_tokens") or body.get("max_completion_tokens") or 512
 
     return NormalizedRequest(
         messages=normalized_msgs,
         model=body.get("model", ""),
-        max_tokens=body.get("max_tokens", 512),
+        max_tokens=max_tokens,
         temperature=body.get("temperature", 0.0),
         stream=body.get("stream", False),
         stop=body.get("stop"),
@@ -449,6 +457,17 @@ def _format_anthropic(
 # ===================================================================
 # Helpers
 # ===================================================================
+
+def _normalize_role(msg: dict) -> dict:
+    """
+    Map non-standard roles to standard ones.
+    Pi/OpenAI uses 'developer' role as a replacement for 'system'.
+    """
+    role = msg.get("role", "")
+    if role == "developer":
+        return {**msg, "role": "system"}
+    return msg
+
 
 def _normalize_message_content(msg: dict) -> dict:
     """
