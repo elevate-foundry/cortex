@@ -945,6 +945,23 @@ class Cortex:
             with open(log_file, "a") as f:
                 f.write(json.dumps(entry) + "\n")
 
+            # --- BRAID: weave prompt hash into tamper-evident chain ---
+            from src.audit_braid import AuditBraid
+            braid_path = log_dir / "race_braid.jsonl"
+            braid = AuditBraid.load(braid_path, knot_interval=5)
+            braid.add_strand(
+                prompt_hash=entry["prompt_hash"],
+                race_ts=entry["ts"],
+                winner_model=winner_model,
+                n_responses=len(all_responses),
+            )
+            knot = braid.maybe_tie_knot()
+            if knot:
+                logger.info(
+                    f"Braid knot #{knot.seq}: {knot.n_strands} strands → "
+                    f"{knot.knot_hash[:16]}..."
+                )
+
             logger.debug(f"Race audit logged: winner={winner_model}, responses={len(all_responses)}")
 
         except Exception as e:

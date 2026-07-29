@@ -1,0 +1,54 @@
+======================================================================
+  LOCAL GOSSIP CONSENSUS RACE — FULL PROOF
+  Models: ['qwen3:0.6b', 'qwen3:1.7b', 'llama3.2:1b']
+  Memory: ~4.7 GB total (all pre-loaded)
+======================================================================
+
+--- TEST 1: Math (sqrt 144) ---
+  Time: 1.6s | 3/3 responded
+    llama3.2:1b          -> "12"
+    qwen3:0.6b           -> "The square root of"
+    qwen3:1.7b           -> "12"
+  Consensus: "12" ← ✓ CORRECT (via llama3.2:1b)
+
+--- TEST 2: Python Knowledge ---
+  Time: 0.6s | 3/3 responded
+    qwen3:0.6b           -> "In Python, `list[-1]` returns the last element of the list."
+    llama3.2:1b          -> "In Python, `list[-1]` returns the last element of the list."
+    qwen3:1.7b           -> "`list[-1]` returns the last element of the list."
+  Consensus: "In Python, `list[-1]` returns the last element of the list." ← ✓ (via qwen3:0.6b)
+
+--- TEST 3: Survival Decision ---
+  Time: 0.3s | 3/3 responded
+    qwen3:0.6b           -> "LEFT"
+    llama3.2:1b          -> "LEFT"
+    qwen3:1.7b           -> "LEFT"
+  Consensus: "LEFT" ← ✓ CORRECT (via qwen3:0.6b)
+
+--- TEST 4: Ambiguous (clustering test) ---
+  Time: 0.2s | 3/3 responded
+    llama3.2:1b          -> "Yes."
+    qwen3:0.6b           -> "No, a hot dog"
+    qwen3:1.7b           -> "No."
+  Consensus: "Yes." (majority rules, via llama3.2:1b)
+
+======================================================================
+  AUDIT LOG: 11 total races in logs/race_audit.jsonl
+
+  2026-07-29T03:14:47 | 3 models | 2 cluster(s) | winner: llama3.2:1b
+    prompt: "What is the square root of 144? Answer with ONLY the number."
+    answer: "12"
+
+  2026-07-29T03:14:47 | 3 models | 2 cluster(s) | winner: qwen3:0.6b
+    prompt: "In Python, what does list[-1] return? One sentence."
+    answer: "In Python, `list[-1]` returns the last element of the list."
+
+  2026-07-29T03:14:48 | 3 models | 1 cluster(s) | winner: qwen3:0.6b
+    prompt: "HP=1. Enemy attacks next turn (instant death). Healing potio"
+    answer: "LEFT"
+
+  2026-07-29T03:14:48 | 3 models | 3 cluster(s) | winner: llama3.2:1b
+    prompt: "Is a hot dog a sandwich? Yes or no only."
+    answer: "Yes."
+
+======================================================================
