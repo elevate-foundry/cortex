@@ -62,6 +62,7 @@ from .scl.audit import build_scl_from_response, build_scl_from_streaming_route, 
 from .braille.manifest import system_manifest
 from .policy_rewriter import PolicyRewriter
 from .gossip_transport import GossipTransport
+from .ckm.rl_loop import OnlineLearningLoop
 
 
 logger = logging.getLogger("cortex")
@@ -106,6 +107,7 @@ class DaemonServer:
             listen_host=host,
             listen_port=port,
         )
+        self.rl_loop = OnlineLearningLoop(update_interval=25)
         self.start_time = 0.0
         self.request_count = 0
         self._zombies_reaped = 0
@@ -698,6 +700,24 @@ class DaemonServer:
             cost_usd=cost_usd,
             provider=provider_name,
         )
+
+        # --- RL: feed experience into learning loop ---
+        try:
+            self.rl_loop.observe({
+                "routed_tier": routed_tier,
+                "actual_model": actual_model,
+                "category": category,
+                "confidence": confidence,
+                "tokens_prompt": tokens_prompt,
+                "tokens_completion": tokens_completion,
+                "latency_ms": latency_ms,
+                "ttft_ms": latency_ms,
+                "cost_usd": cost_usd,
+                "error": error_msg,
+                "escalation_path": "→".join(escalation_path) if escalation_path else "",
+            })
+        except Exception:
+            pass  # never fail a request due to RL
 
     async def _run_tool_loop(
         self,
