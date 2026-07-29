@@ -566,6 +566,188 @@ class Cortex:
         )
 
     # ------------------------------------------------------------------
+    # Quality race — fire all models, collect ALL, pick the best
+    # ------------------------------------------------------------------
+
+    def race_quality(
+        self,
+        prompt: str,
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+        candidates: Optional[list[str]] = None,
+        judge: Optional[Callable[[list[tuple[str, str]]], int]] = None,
+    ) -> Optional[tuple[str, str, list[tuple[str, str]]]]:
+        """
+        Quality race with gossip consensus.
+
+        Fire N models in parallel, wait for ALL responses, then run a
+        gossip-style convergence protocol where models "vote" on the best
+        answer by clustering agreement and propagating preferences.
+
+        The gossip protocol ensures:
+        - Responses are clustered by semantic agreement
+        - Cross-family agreement gets bonus weight (independent validation)
+        - The consensus is the answer that the most models converge on
+        - Minority responses are preserved as alternatives
+
+        Unlike race_cloud (TTFT-optimized), this maximizes answer QUALITY.
+        Cost is O(N) API calls — use when getting the RIGHT answer matters
+        more than speed (e.g., game decisions, important reasoning).
+
+        Returns (winner_model, winner_response, all_responses) or None.
+        """
+        import threading
+        import time as _time
+        import httpx
+
+        if self._pool is None:
+            return None
+        or_backend = self._pool.get_backend(BackendType.OPENROUTER)
+        if or_backend is None or not or_backend.api_key:
+            return None
+
+        models = candidates or self._RACE_CANDIDATES
+        api_key = or_backend.api_key
+        results: dict[str, str] = {}
+        timings: dict[str, float] = {}
+        lock = threading.Lock()
+
+        def worker(model_id: str):
+            t0 = _time.time()
+            try:
+                resp = httpx.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://github.com/elevate-foundry/cortex",
+                    },
+                    json={
+                        "model": model_id,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                    timeout=90.0,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"]
+                    with lock:
+                        results[model_id] = content
+                        timings[model_id] = _time.time() - t0
+            except Exception:
+                pass
+
+        # Phase 1: Fire all models in parallel
+        threads = [threading.Thread(target=worker, args=(m,), daemon=True) for m in models]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=90.0)
+
+        if not results:
+            return None
+
+        all_responses = [(mid, resp) for mid, resp in results.items()]
+
+        # Phase 2: Gossip consensus — cluster by agreement
+        if judge:
+            winner_idx = judge(all_responses)
+        else:
+            winner_idx = self._gossip_consensus(all_responses, timings)
+
+        winner_model, winner_response = all_responses[winner_idx]
+        return (winner_model, winner_response, all_responses)
+
+    def _gossip_consensus(
+        self,
+        responses: list[tuple[str, str]],
+        timings: dict[str, float],
+    ) -> int:
+        """
+        Gossip-style consensus: each model's response is a "peer" that
+        propagates its state. Peers cluster by semantic agreement.
+        The largest cluster's highest-weighted member wins.
+
+        Weighting:
+        - Cross-family agreement bonus (independent validation)
+        - Faster response = slight tiebreaker (model was more confident)
+        - Longer substantive response = slight quality signal
+        """
+        from .challenger import compare_answers, AgreementLevel
+
+        if len(responses) <= 1:
+            return 0
+
+        # Build agreement graph — each pair of responses gets a score
+        n = len(responses)
+        agreement_matrix = [[0.0] * n for _ in range(n)]
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                level, _, _ = compare_answers(responses[i][1], responses[j][1])
+                score = {
+                    AgreementLevel.STRONG_AGREE: 1.0,
+                    AgreementLevel.WEAK_AGREE: 0.6,
+                    AgreementLevel.DISAGREE: 0.0,
+                    AgreementLevel.STRONG_DISAGREE: -0.3,
+                }.get(level, 0.0)
+                agreement_matrix[i][j] = score
+                agreement_matrix[j][i] = score
+
+        # Greedy clustering (same as swarm.py but on cloud responses)
+        clusters: list[list[int]] = []
+        assigned = [False] * n
+
+        for i in range(n):
+            if assigned[i]:
+                continue
+            cluster = [i]
+            assigned[i] = True
+            for j in range(i + 1, n):
+                if assigned[j]:
+                    continue
+                # Join cluster if agrees with majority of existing members
+                agree_count = sum(1 for k in cluster if agreement_matrix[j][k] >= 0.6)
+                if agree_count > len(cluster) / 2:
+                    cluster.append(j)
+                    assigned[j] = True
+            clusters.append(cluster)
+
+        # Gossip round: propagate cluster preferences
+        # Each cluster's weight = sum of individual member weights
+        def member_weight(idx: int) -> float:
+            mid, resp = responses[idx]
+            w = 1.0
+            # Cross-family bonus: different provider prefixes = independent
+            family = mid.split("/")[0] if "/" in mid else mid
+            # Substantive response bonus (log-scaled, caps at ~2x)
+            import math
+            w += min(1.0, math.log(max(len(resp), 1)) / 10)
+            # Speed bonus (faster = more confident, slight effect)
+            if mid in timings:
+                speed_bonus = max(0, 1.0 - timings[mid] / 30.0) * 0.3
+                w += speed_bonus
+            return w
+
+        cluster_weights = []
+        for cluster in clusters:
+            total_w = sum(member_weight(i) for i in cluster)
+            # Cross-family bonus: count distinct providers in cluster
+            families = set(responses[i][0].split("/")[0] for i in cluster)
+            cross_family_bonus = (len(families) - 1) * 0.5
+            cluster_weights.append(total_w + cross_family_bonus)
+
+        # Winner = best member of heaviest cluster
+        best_cluster_idx = max(range(len(clusters)), key=lambda i: cluster_weights[i])
+        best_cluster = clusters[best_cluster_idx]
+
+        # Within the winning cluster, pick the highest-weighted member
+        winner_local = max(best_cluster, key=member_weight)
+        return winner_local
+
+    # ------------------------------------------------------------------
     # Streaming support
     # ------------------------------------------------------------------
 
