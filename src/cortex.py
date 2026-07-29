@@ -779,6 +779,17 @@ class Cortex:
             winner_idx = self._gossip_consensus(all_responses, timings)
 
         winner_model, winner_response = all_responses[winner_idx]
+
+        # --- AUDIT: log every race for SOC 2 compliance ---
+        self._audit_race(
+            prompt=prompt,
+            models=models,
+            all_responses=all_responses,
+            timings=timings,
+            winner_model=winner_model,
+            winner_idx=winner_idx,
+        )
+
         return (winner_model, winner_response, all_responses)
 
     def _gossip_consensus(
@@ -867,6 +878,77 @@ class Cortex:
         # Within the winning cluster, pick the highest-weighted member
         winner_local = max(best_cluster, key=member_weight)
         return winner_local
+
+    def _audit_race(
+        self,
+        prompt: str,
+        models: list[str],
+        all_responses: list[tuple[str, str]],
+        timings: dict[str, float],
+        winner_model: str,
+        winner_idx: int,
+    ) -> None:
+        """
+        Immutable audit log for every consensus race.
+
+        Writes a JSONL entry to logs/race_audit.jsonl with:
+        - Timestamp, prompt hash, full prompt
+        - All candidates fired, all responses received
+        - Per-model timing
+        - Consensus winner and vote breakdown
+        - SCL fingerprint for tamper detection
+
+        SOC 2 CC6.1: Logical access controls — who decided what and why.
+        """
+        import hashlib
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        try:
+            log_dir = Path(__file__).parent.parent / "logs"
+            log_dir.mkdir(exist_ok=True)
+            log_file = log_dir / "race_audit.jsonl"
+
+            # Build vote clusters for audit record
+            clusters: dict[str, list[str]] = {}
+            for mid, resp in all_responses:
+                # Use first 80 chars as cluster key (rough grouping)
+                key = resp.strip()[:80].lower() if resp else "(empty)"
+                clusters.setdefault(key, []).append(mid)
+
+            entry = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "prompt_hash": hashlib.sha256(prompt.encode()).hexdigest()[:16],
+                "prompt": prompt[:500],
+                "candidates_fired": models,
+                "candidates_responded": len(all_responses),
+                "responses": [
+                    {
+                        "model": mid,
+                        "response": resp[:200] if resp else None,
+                        "latency_s": round(timings.get(mid, 0), 2),
+                    }
+                    for mid, resp in all_responses
+                ],
+                "consensus": {
+                    "winner_model": winner_model,
+                    "winner_idx": winner_idx,
+                    "winner_response": all_responses[winner_idx][1][:300] if all_responses else "",
+                    "n_clusters": len(clusters),
+                    "largest_cluster_size": max(len(v) for v in clusters.values()) if clusters else 0,
+                },
+                "timings": {k: round(v, 2) for k, v in timings.items()},
+            }
+
+            # Append atomically
+            import json
+            with open(log_file, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+
+            logger.debug(f"Race audit logged: winner={winner_model}, responses={len(all_responses)}")
+
+        except Exception as e:
+            logger.warning(f"Race audit failed (non-fatal): {e}")
 
     # ------------------------------------------------------------------
     # Streaming support

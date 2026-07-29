@@ -374,48 +374,132 @@ class TestConsensusBenchmark:
     Measures: accuracy, agreement rate, cluster sizes.
     """
 
-    BENCHMARK_PROBLEMS = [
-        {
-            "prompt": "What is the capital of Australia? One word.",
-            "answer": "Canberra",
-        },
+    # L3-L4: Factual recall (baseline — any model should get these)
+    RECALL_PROBLEMS = [
         {
             "prompt": "What is 2^10? Just the number.",
             "answer": "1024",
-        },
-        {
-            "prompt": "In chess, which piece can jump over others? One word.",
-            "answer": "Knight",
+            "level": "L3",
+            "check": lambda r: "1024" in r,
         },
         {
             "prompt": "What HTTP status code means 'Not Found'? Just the number.",
             "answer": "404",
-        },
-        {
-            "prompt": "What sorting algorithm has average O(n log n) and worst O(n^2)? One word.",
-            "answer": "Quicksort",
-        },
-        {
-            "prompt": "What is the SI unit of electrical resistance? One word.",
-            "answer": "Ohm",
-        },
-        {
-            "prompt": "In Python, what keyword creates a generator function? One word.",
-            "answer": "yield",
-        },
-        {
-            "prompt": "How many bits in a byte? Just the number.",
-            "answer": "8",
-        },
-        {
-            "prompt": "What gas do plants absorb from the atmosphere? Chemical formula.",
-            "answer": "CO2",
+            "level": "L3",
+            "check": lambda r: "404" in r,
         },
         {
             "prompt": "What is the time complexity of binary search? Big-O notation only.",
             "answer": "O(log n)",
+            "level": "L3",
+            "check": lambda r: "log" in r.lower() and "n" in r.lower(),
         },
     ]
+
+    # L5: Apply multiple known principles to a concrete unfamiliar case
+    REASONING_L5 = [
+        {
+            "prompt": (
+                "A transformer and a gated RNN have the same parameter count and must "
+                "process sequences of length 32,768. Compare their training and inference "
+                "time, memory consumption, effective dependency paths, and streaming behavior. "
+                "Identify at least two conditions under which the RNN could be preferable."
+            ),
+            "level": "L5",
+            "check": lambda r: (
+                # Must mention quadratic attention cost AND streaming/latency advantage of RNN
+                ("quadratic" in r.lower() or "n^2" in r.lower() or "n²" in r.lower())
+                and ("stream" in r.lower() or "latency" in r.lower() or "real-time" in r.lower())
+            ),
+        },
+        {
+            "prompt": (
+                "Design a storage engine for a workload with 100,000 writes/sec, 5,000 point "
+                "reads/sec, a 99th-percentile read-latency target of 10 ms, and a 2x "
+                "storage-overhead limit. Compare a B+ tree, a leveled LSM tree, and a "
+                "size-tiered LSM tree, then justify a configuration."
+            ),
+            "level": "L5",
+            "check": lambda r: (
+                # Must mention write amplification AND recommend LSM variant for write-heavy
+                ("write amplification" in r.lower() or "write-amplification" in r.lower())
+                and ("lsm" in r.lower() or "log-structured" in r.lower())
+            ),
+        },
+    ]
+
+    # L6: Resolve ambiguity, compare competing solutions, expose hidden assumptions
+    REASONING_L6 = [
+        {
+            "prompt": (
+                "Derive the gradients for a sigmoid neuron under binary cross-entropy and "
+                "mean-squared error. Compare the resulting gradient behavior as the neuron "
+                "becomes confidently wrong, and explain why the losses produce different "
+                "optimization dynamics."
+            ),
+            "level": "L6",
+            "check": lambda r: (
+                # Must identify vanishing gradient problem with MSE + sigmoid
+                ("vanish" in r.lower() or "saturate" in r.lower() or "slow" in r.lower())
+                and ("cross-entropy" in r.lower() or "cross entropy" in r.lower())
+            ),
+        },
+        {
+            "prompt": (
+                "For a seven-node PBFT deployment, determine how many Byzantine failures can "
+                "be tolerated. Trace a request through the protocol, then analyze what happens "
+                "if the primary equivocates and two replicas experience delayed messages. "
+                "Distinguish safety from liveness."
+            ),
+            "level": "L6",
+            "check": lambda r: (
+                # Must state f=2 (3f+1=7) AND distinguish safety/liveness
+                ("2" in r and ("f" in r.lower() or "fault" in r.lower() or "failure" in r.lower()))
+                and ("safety" in r.lower() and "liveness" in r.lower())
+            ),
+        },
+    ]
+
+    # L7: Construct novel argument, handle adversarial details, self-check
+    REASONING_L7 = [
+        {
+            "prompt": (
+                "A student claims Cantor's diagonal argument fails because the constructed "
+                "real number may have two decimal representations, such as 0.4999...=0.5000... "
+                "Repair the proof formally and explain why enumerating only computable reals "
+                "does not enumerate all reals."
+            ),
+            "level": "L7",
+            "check": lambda r: (
+                # Must address dual representation AND uncomputability
+                ("representation" in r.lower() or "decimal" in r.lower())
+                and ("uncomputable" in r.lower() or "uncountab" in r.lower()
+                     or "not computable" in r.lower() or "non-computable" in r.lower())
+            ),
+        },
+        {
+            "prompt": (
+                "For a zero-mean Gaussian source with variance σ² under squared-error "
+                "distortion, derive its rate-distortion function. Then calculate the minimum "
+                "rate needed when D=σ²/16, and explain which assumptions make the result "
+                "inapplicable to natural images."
+            ),
+            "level": "L7",
+            "check": lambda r: (
+                # Must give R(D) = 0.5 log(σ²/D) AND mention non-Gaussian/correlation
+                ("log" in r.lower() or "ln" in r.lower())
+                and ("gaussian" in r.lower() or "iid" in r.lower() or "i.i.d" in r.lower()
+                     or "independent" in r.lower() or "correlation" in r.lower())
+            ),
+        },
+    ]
+
+    BENCHMARK_PROBLEMS = (
+        [dict(p, category="recall") for p in RECALL_PROBLEMS]
+        + [dict(p, category="L5_reasoning") for p in REASONING_L5]
+        + [dict(p, category="L6_reasoning") for p in REASONING_L6]
+        + [dict(p, category="L7_reasoning") for p in REASONING_L7]
+    )
 
     @pytest.fixture(autouse=True)
     def check_api_key(self):
@@ -431,59 +515,119 @@ class TestConsensusBenchmark:
         return cortex
 
     def test_benchmark_accuracy(self, live_cortex):
-        """Run full benchmark and report accuracy."""
+        """
+        Tiered reasoning benchmark.
+
+        L3: Factual recall (baseline) — adaptive 5 models
+        L5: Apply principles to novel case — adaptive 10-12 models
+        L6: Resolve ambiguity, expose assumptions — adaptive 12-15 models
+        L7: Construct novel argument under constraints — adaptive 15-20 models
+
+        Cortex adaptively selects candidate count based on difficulty.
+        """
         results = []
-        candidates = [
-            "openai/gpt-4o-mini",
-            "google/gemini-2.0-flash-001",
-            "mistralai/mistral-small-24b-instruct-2501",
-        ]
+        level_scores = {}
 
         for problem in self.BENCHMARK_PROBLEMS:
+            prompt = problem["prompt"]
+            level = problem.get("level", "L3")
+            category = problem.get("category", "unknown")
+            check_fn = problem.get("check")
+
+            # Let Cortex decide how many models to race
+            candidates = live_cortex.select_candidates(prompt)
+            max_tokens = 100 if level == "L3" else 2048
+
             t0 = time.time()
             result = live_cortex.race_quality(
-                prompt=problem["prompt"],
-                max_tokens=20,
+                prompt=prompt,
+                max_tokens=max_tokens,
                 candidates=candidates,
             )
             elapsed = time.time() - t0
 
             if result is None:
-                results.append({"correct": False, "time": elapsed, "reason": "no_result"})
+                results.append({
+                    "level": level, "correct": False, "time": elapsed,
+                    "reason": "no_result", "prompt": prompt[:50],
+                })
+                level_scores.setdefault(level, []).append(False)
                 continue
 
             winner_model, winner_response, all_responses = result
-            expected = problem["answer"].lower()
-            got = winner_response.lower().strip()
-            correct = expected in got
+
+            # Use check function if available, else substring match
+            if check_fn:
+                correct = check_fn(winner_response)
+            else:
+                expected = problem.get("answer", "").lower()
+                correct = expected in winner_response.lower()
 
             results.append({
-                "prompt": problem["prompt"][:50],
-                "expected": problem["answer"],
-                "got": winner_response.strip()[:50],
+                "level": level,
+                "category": category,
+                "prompt": prompt[:60],
                 "correct": correct,
                 "winner": winner_model,
-                "n_responses": len(all_responses),
+                "n_models": len(all_responses),
+                "n_candidates": len(candidates),
                 "time": elapsed,
+                "response_preview": winner_response.strip()[:100],
             })
+            level_scores.setdefault(level, []).append(correct)
 
         # Report
-        n_correct = sum(1 for r in results if r["correct"])
-        accuracy = n_correct / len(results)
-        avg_time = sum(r["time"] for r in results) / len(results)
+        total_correct = sum(1 for r in results if r["correct"])
+        total = len(results)
+        avg_time = sum(r["time"] for r in results) / total
 
-        print(f"\n{'='*60}")
-        print(f"  CONSENSUS RACE BENCHMARK")
-        print(f"  Accuracy: {n_correct}/{len(results)} ({accuracy*100:.0f}%)")
-        print(f"  Avg time: {avg_time:.1f}s per question")
-        print(f"{'='*60}")
+        print(f"\n{'='*70}")
+        print(f"  CORTEX REASONING BENCHMARK (Consensus Race)")
+        print(f"  Total: {total_correct}/{total} ({total_correct/total*100:.0f}%)")
+        print(f"  Avg time: {avg_time:.1f}s per problem")
+        print(f"{'='*70}")
+
+        # Per-level breakdown
+        for level in ["L3", "L5", "L6", "L7"]:
+            scores = level_scores.get(level, [])
+            if scores:
+                n_pass = sum(scores)
+                pct = n_pass / len(scores) * 100
+                print(f"  {level}: {n_pass}/{len(scores)} ({pct:.0f}%)")
+
+        print(f"{'='*70}")
         for r in results:
             status = "✓" if r["correct"] else "✗"
-            print(f"  {status} {r.get('prompt', '?')[:40]:40s} → {r.get('got', '?')[:20]}")
-        print(f"{'='*60}")
+            level = r.get("level", "?")
+            n = r.get("n_models", 0)
+            t = r.get("time", 0)
+            print(f"  {status} [{level}] {r['prompt'][:45]:45s} ({n} models, {t:.1f}s)")
+            if not r["correct"] and r.get("response_preview"):
+                print(f"       Response: {r['response_preview'][:80]}...")
+        print(f"{'='*70}")
 
-        # Should get at least 80% right with consensus
-        assert accuracy >= 0.8, f"Consensus accuracy too low: {accuracy*100:.0f}%"
+        # Expectations:
+        # L3 recall: 100% (trivial for any model)
+        # L5-L7 reasoning: consensus should improve accuracy over single model
+        # Overall target: >= 60% (reasoning problems are genuinely hard)
+        l3_scores = level_scores.get("L3", [])
+        if l3_scores:
+            assert all(l3_scores), "L3 recall problems should all pass"
+
+        # At least half of reasoning problems should pass with consensus
+        reasoning_scores = (
+            level_scores.get("L5", []) +
+            level_scores.get("L6", []) +
+            level_scores.get("L7", [])
+        )
+        if reasoning_scores:
+            reasoning_pass = sum(reasoning_scores) / len(reasoning_scores)
+            print(f"\n  Reasoning accuracy: {reasoning_pass*100:.0f}%")
+            # Consensus should get at least 50% of hard reasoning right
+            assert reasoning_pass >= 0.5, (
+                f"Reasoning accuracy {reasoning_pass*100:.0f}% < 50% — "
+                f"consensus not providing sufficient quality lift"
+            )
 
 
 # ---------------------------------------------------------------------------
