@@ -758,7 +758,7 @@ class Cortex:
         if not results:
             return None
 
-        all_responses = [(mid, resp) for mid, resp in results.items()]
+        all_responses = [(mid, resp) for mid, resp in results.items() if resp]
 
         # Phase 2: Gossip consensus — cluster by agreement
         if judge:
