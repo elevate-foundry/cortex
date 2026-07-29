@@ -462,6 +462,8 @@ class DaemonServer:
                     }
                     if normalized.tools:
                         forward_body["tools"] = normalized.tools
+                        if normalized.tool_choice:
+                            forward_body["tool_choice"] = normalized.tool_choice
 
                     routed_tier = "L7"
                     actual_model = explicit_model
@@ -497,6 +499,8 @@ class DaemonServer:
                     }
                     if normalized.tools:
                         forward_body["tools"] = normalized.tools
+                        if normalized.tool_choice:
+                            forward_body["tool_choice"] = normalized.tool_choice
                     if TIER_SPECS[tier].always_hot:
                         forward_body["keep_alive"] = "24h"
 
@@ -557,7 +561,60 @@ class DaemonServer:
                     "error": {"message": f"Streaming error: {e}", "type": "server_error"}
                 })
         else:
-            # Non-streaming: full Cortex pipeline with autonomous tool loop
+            # Non-streaming path
+            explicit_model = normalized.model if (normalized.model and "/" in normalized.model) else ""
+
+            # --- Direct proxy for explicit cloud model (preserves tool_calls) ---
+            if explicit_model and self._network_watcher.has_network:
+                try:
+                    import urllib.request, urllib.error
+                    from .backend_adapter import BackendType
+                    or_backend = self.cortex._pool.get_backend(BackendType.OPENROUTER) if self.cortex._pool else None
+                    if or_backend:
+                        proxy_body = {
+                            "model": explicit_model,
+                            "messages": normalized.messages,
+                            "max_tokens": max(normalized.max_tokens, 256),
+                            "temperature": normalized.temperature,
+                            "stream": False,
+                        }
+                        if normalized.tools:
+                            proxy_body["tools"] = normalized.tools
+                            if normalized.tool_choice:
+                                proxy_body["tool_choice"] = normalized.tool_choice
+
+                        proxy_url = f"{or_backend.base_url}/v1/chat/completions"
+                        proxy_headers = or_backend._headers()
+                        proxy_headers["Content-Type"] = "application/json"
+                        import json as _json
+                        proxy_data = _json.dumps(proxy_body).encode()
+                        proxy_req = urllib.request.Request(
+                            proxy_url, data=proxy_data, headers=proxy_headers, method="POST"
+                        )
+                        loop = asyncio.get_event_loop()
+                        raw_resp = await loop.run_in_executor(
+                            None,
+                            lambda: urllib.request.urlopen(proxy_req, timeout=120).read()
+                        )
+                        resp_json = json.loads(raw_resp)
+                        # Inject routing metadata
+                        resp_json["_routing"] = {
+                            "tier": "L7", "category": "unknown", "confidence": 1.0,
+                            "backend_model": explicit_model,
+                            "escalation_path": [f"explicit_model→{explicit_model}"],
+                            "total_ms": 0.0, "thread_id": thread_id,
+                            "tool_rounds": 0,
+                            "tokens_prompt": resp_json.get("usage", {}).get("prompt_tokens", 0),
+                            "tokens_completion": resp_json.get("usage", {}).get("completion_tokens", 0),
+                            "cost_usd": float(resp_json.get("usage", {}).get("cost", 0) or 0),
+                            "provider": resp_json.get("provider", ""),
+                        }
+                        await self._send_json(writer, 200, resp_json)
+                        return
+                except Exception as proxy_err:
+                    logger.warning(f"Direct proxy failed, falling back to pipeline: {proxy_err}")
+
+            # Full Cortex pipeline with autonomous tool loop
             try:
                 # Auto-inject available tools if the client didn't provide any
                 if not normalized.tools:
@@ -719,6 +776,76 @@ class DaemonServer:
         except Exception:
             pass  # never fail a request due to RL
 
+    def _should_race(self, messages: list[dict]) -> bool:
+        """
+        Decide if a request warrants gossip consensus racing.
+
+        Triggers consensus when:
+        - Prompt complexity >= 0.6 (hard problems benefit from multi-model agreement)
+        - Not a trivial/short prompt
+        """
+        from .router import _estimate_complexity
+
+        # Extract the last user message
+        prompt = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                c = msg.get("content", "")
+                prompt = c if isinstance(c, str) else ""
+                break
+
+        if len(prompt) < 50:
+            return False  # Too short — not worth racing
+
+        complexity = _estimate_complexity(prompt)
+        return complexity >= 0.6
+
+    def _race_and_wrap(self, messages: list[dict], max_tokens: int) -> Optional["CortexResponse"]:
+        """
+        Run a consensus race and wrap the result as a CortexResponse.
+        """
+        from .cortex import CortexResponse
+        from .router import route_heuristic, _estimate_complexity
+        from .tiers import Tier
+
+        # Extract prompt for candidate selection
+        prompt = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                c = msg.get("content", "")
+                prompt = c if isinstance(c, str) else ""
+                break
+
+        t0 = time.monotonic()
+        result = self.cortex.race_quality(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=0.3,
+        )
+
+        if result is None:
+            # Fallback to normal processing
+            return self.cortex.process(messages, max_tokens=max_tokens)
+
+        winner_model, winner_response, all_responses = result
+        total_ms = (time.monotonic() - t0) * 1000
+
+        # Build a CortexResponse from the race result
+        route = route_heuristic(prompt, max_tier=self.cortex._max_tier)
+        return CortexResponse(
+            content=winner_response,
+            tier_used=Tier.L7,
+            model_used=winner_model,
+            confidence=len(all_responses) / max(len(self.cortex.select_candidates(prompt)), 1),
+            route_decision=route,
+            total_ms=total_ms,
+            escalation_path=[
+                f"consensus_race→{len(all_responses)}_models",
+                f"winner→{winner_model}",
+            ],
+            provider="openrouter/consensus",
+        )
+
     async def _run_tool_loop(
         self,
         messages: list[dict],
@@ -740,7 +867,7 @@ class DaemonServer:
         if explicit_model and not self._network_watcher.has_network:
             raise RuntimeError("Cloud model requested but no network available")
 
-        for _ in range(max_rounds):
+        for round_idx in range(max_rounds):
             loop = asyncio.get_event_loop()
             if explicit_model:
                 cortex_resp = await loop.run_in_executor(
@@ -750,17 +877,33 @@ class DaemonServer:
                         model=explicit_model,
                         max_tokens=normalized.max_tokens,
                         tools=normalized.tools,
+                        tool_choice=normalized.tool_choice,
                     ),
                 )
             else:
-                cortex_resp = await loop.run_in_executor(
-                    None,
-                    lambda: self.cortex.process(
-                        current_messages,
-                        max_tokens=normalized.max_tokens,
-                        tools=normalized.tools,
-                    ),
+                # Check if this request warrants consensus racing
+                # (first round only, no tools requested, network available)
+                use_consensus = (
+                    round_idx == 0
+                    and not normalized.tools
+                    and self._network_watcher.has_network
+                    and self._should_race(current_messages)
                 )
+
+                if use_consensus:
+                    cortex_resp = await loop.run_in_executor(
+                        None,
+                        lambda: self._race_and_wrap(current_messages, normalized.max_tokens),
+                    )
+                else:
+                    cortex_resp = await loop.run_in_executor(
+                        None,
+                        lambda: self.cortex.process(
+                            current_messages,
+                            max_tokens=normalized.max_tokens,
+                            tools=normalized.tools,
+                        ),
+                    )
             final_cortex_resp = cortex_resp
 
             if not cortex_resp or not cortex_resp.raw_response:
