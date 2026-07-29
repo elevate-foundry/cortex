@@ -420,29 +420,76 @@ class DaemonServer:
         error_msg = ""
 
         if stream:
-            # Streaming: resolve backend via Cortex, then stream via aiohttp
+            # Streaming: resolve backend, then proxy SSE
             try:
                 import aiohttp
 
-                loop = asyncio.get_event_loop()
-                route, tier, adapter, model_tag = await loop.run_in_executor(
-                    None,
-                    lambda: self.cortex.resolve_backend(normalized.messages),
-                )
-                routed_tier = tier.name
-                actual_model = model_tag
-                category = route.category.value
-                confidence = route.confidence
+                explicit_model = normalized.model if (normalized.model and "/" in normalized.model) else ""
 
-                if adapter is None:
-                    await self._send_json(writer, 503, {
-                        "error": {"message": "No backend available", "type": "server_error"}
-                    })
-                    return
+                if explicit_model:
+                    # --- Cloud streaming (OpenRouter) ---
+                    from .backend_adapter import BackendType
+                    or_backend = self.cortex._pool.get_backend(BackendType.OPENROUTER) if self.cortex._pool else None
+                    if or_backend is None:
+                        await self._send_json(writer, 503, {
+                            "error": {"message": "No cloud backend available", "type": "server_error"}
+                        })
+                        return
+
+                    target_url = f"{or_backend.base_url}/v1/chat/completions"
+                    headers = or_backend._headers()
+                    forward_body = {
+                        "model": explicit_model,
+                        "messages": normalized.messages,
+                        "max_tokens": max(normalized.max_tokens, 256),
+                        "temperature": normalized.temperature,
+                        "stream": True,
+                    }
+                    if normalized.tools:
+                        forward_body["tools"] = normalized.tools
+
+                    routed_tier = "L7"
+                    actual_model = explicit_model
+                    category = "unknown"
+                    confidence = 1.0
+                    escalation_path = [f"explicit_model→{explicit_model}"]
+                else:
+                    # --- Local streaming (Ollama) ---
+                    loop = asyncio.get_event_loop()
+                    route, tier, adapter, model_tag = await loop.run_in_executor(
+                        None,
+                        lambda: self.cortex.resolve_backend(normalized.messages),
+                    )
+                    routed_tier = tier.name
+                    actual_model = model_tag
+                    category = route.category.value
+                    confidence = route.confidence
+
+                    if adapter is None:
+                        await self._send_json(writer, 503, {
+                            "error": {"message": "No backend available", "type": "server_error"}
+                        })
+                        return
+
+                    target_url = f"{adapter.base_url}/v1/chat/completions"
+                    headers = {"Content-Type": "application/json"}
+                    forward_body = {
+                        "model": model_tag,
+                        "messages": normalized.messages,
+                        "max_tokens": max(normalized.max_tokens, 256),
+                        "temperature": normalized.temperature,
+                        "stream": True,
+                    }
+                    if normalized.tools:
+                        forward_body["tools"] = normalized.tools
+                    if TIER_SPECS[tier].always_hot:
+                        forward_body["keep_alive"] = "24h"
 
                 # --- SCL audit (streaming) ---
                 try:
-                    scl_text, scl_fp = build_scl_from_streaming_route(route, model_tag, tier.name)
+                    from .router import route_heuristic
+                    route_for_scl = route_heuristic("", max_tier=self.cortex._max_tier)
+                    scl_text, scl_fp = build_scl_from_streaming_route(route_for_scl, actual_model, routed_tier)
                     self.memory.log_scl_audit(
                         request_id="",
                         thread_id=thread_id,
@@ -452,37 +499,41 @@ class DaemonServer:
                 except Exception:
                     pass  # never fail a request due to SCL
 
-                # Build streaming request to the Ollama backend
-                forward_body = {
-                    "model": model_tag,
-                    "messages": normalized.messages,
-                    "max_tokens": max(normalized.max_tokens, 256),
-                    "temperature": normalized.temperature,
-                    "stream": True,
-                }
-                if normalized.tools:
-                    forward_body["tools"] = normalized.tools
-                if TIER_SPECS[tier].always_hot:
-                    forward_body["keep_alive"] = "24h"
-
-                target_url = f"{adapter.base_url}/v1/chat/completions"
-
+                # --- Proxy SSE stream ---
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
-                        target_url, json=forward_body,
-                        timeout=aiohttp.ClientTimeout(total=120),
+                        target_url, json=forward_body, headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=180),
                     ) as resp:
-                        header = (
+                        http_header = (
                             f"HTTP/1.1 {resp.status} OK\r\n"
                             f"Content-Type: text/event-stream\r\n"
                             f"Cache-Control: no-cache\r\n"
                             f"Connection: close\r\n"
                             f"\r\n"
                         )
-                        writer.write(header.encode())
+                        writer.write(http_header.encode())
+
+                        # Stream chunks and extract usage from final chunk
+                        last_data = ""
                         async for chunk in resp.content:
                             writer.write(chunk)
+                            # Track last data line for usage extraction
+                            chunk_str = chunk.decode("utf-8", errors="ignore")
+                            for line in chunk_str.split("\n"):
+                                if line.startswith("data: ") and line != "data: [DONE]":
+                                    last_data = line[6:]
                         await writer.drain()
+
+                        # Extract usage from final SSE chunk (OpenRouter includes it)
+                        if last_data:
+                            try:
+                                final = json.loads(last_data)
+                                usage = final.get("usage", {})
+                                tokens_prompt = usage.get("prompt_tokens", 0) or 0
+                                tokens_completion = usage.get("completion_tokens", 0) or 0
+                            except (json.JSONDecodeError, AttributeError):
+                                pass
 
             except Exception as e:
                 logger.error("Streaming error: %s", e, exc_info=True)
