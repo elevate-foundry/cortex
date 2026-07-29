@@ -428,6 +428,13 @@ class DaemonServer:
 
                 if explicit_model:
                     # --- Cloud streaming (OpenRouter) ---
+                    # Network check: don't attempt cloud if offline
+                    if not self._network_watcher.has_network:
+                        await self._send_json(writer, 503, {
+                            "error": {"message": "Cloud model requested but no network available", "type": "server_error"}
+                        })
+                        return
+
                     from .backend_adapter import BackendType
                     or_backend = self.cortex._pool.get_backend(BackendType.OPENROUTER) if self.cortex._pool else None
                     if or_backend is None:
@@ -702,6 +709,10 @@ class DaemonServer:
 
         # Determine if this is an explicit model request
         explicit_model = normalized.model if (normalized.model and "/" in normalized.model) else ""
+
+        # Network check: fail fast if cloud model requested but offline
+        if explicit_model and not self._network_watcher.has_network:
+            raise RuntimeError("Cloud model requested but no network available")
 
         for _ in range(max_rounds):
             loop = asyncio.get_event_loop()
