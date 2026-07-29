@@ -1,0 +1,12 @@
+# Cortex runtime dependencies
+# Core (required for daemon + inference routing)
+aiohttp>=3.9.0
+
+# Optional: CKM self-training (only needed for `cortex train`)
+# torch>=2.1.0
+
+# Optional: Modal cloud training
+# modal>=0.60.0
+
+# Optional: GGUF export
+# gguf>=0.6.0

@@ -1,0 +1,33 @@
+{
+  "version": "0.1.0",
+  "mode": "portable",
+  "daemon": {
+    "host": "0.0.0.0",
+    "port": 11411
+  },
+  "models": {
+    "directory": "models/",
+    "ckm_model": "models/cortex-kernel.gguf"
+  },
+  "policy": {
+    "directory": "config/policy/",
+    "dangerous_targets": "config/policy/dangerous_targets.scl",
+    "allowed_verbs": "config/policy/allowed_verbs.scl"
+  },
+  "telemetry": {
+    "database": "logs/boot_telemetry.db",
+    "enabled": true
+  },
+  "training": {
+    "data_dir": "data/training/",
+    "checkpoint_dir": "data/checkpoints/",
+    "default_time_budget_minutes": 10
+  },
+  "self_modification": {
+    "policy_rewriter_enabled": true,
+    "min_samples": 10,
+    "accuracy_threshold": 0.85,
+    "latency_threshold_ms": 5000,
+    "auto_apply_confidence": 0.7
+  }
+}

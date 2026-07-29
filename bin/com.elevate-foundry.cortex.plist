@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.elevate-foundry.cortex</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Volumes/CORTEX/cortex/bin/cortex-mount-watcher</string>
+    </array>
+
+    <!-- Watch for the drive to mount -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/Volumes/CORTEX</string>
+    </array>
+
+    <!-- Also start on load (if drive is already mounted) -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Don't restart if it exits cleanly -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Logging -->
+    <key>StandardOutPath</key>
+    <string>/tmp/cortex-launcher.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/cortex-launcher.err</string>
+</dict>
+</plist>

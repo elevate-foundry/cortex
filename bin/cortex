@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""
+Cortex launcher — run from external drive.
+
+Usage:
+  ./bin/cortex daemon          # Start the HTTP proxy on :11411
+  ./bin/cortex route "prompt"  # Route a single prompt
+  ./bin/cortex train --time-budget 10m  # Self-train CKM
+  ./bin/cortex gossip list     # Show gossip peers
+  ./bin/cortex status          # System status
+
+Environment:
+  CORTEX_HOME=/Volumes/CORTEX/cortex (auto-detected from script location)
+"""
+
+import os
+import sys
+from pathlib import Path
+
+# Auto-detect CORTEX_HOME from script location
+SCRIPT_DIR = Path(__file__).resolve().parent
+CORTEX_HOME = SCRIPT_DIR.parent
+
+# Set environment so all modules find config/models/logs on the drive
+os.environ.setdefault("CORTEX_HOME", str(CORTEX_HOME))
+os.environ.setdefault("CORTEX_MODELS", str(CORTEX_HOME / "models"))
+os.environ.setdefault("CORTEX_CONFIG", str(CORTEX_HOME / "config"))
+os.environ.setdefault("CORTEX_LOGS", str(CORTEX_HOME / "logs"))
+os.environ.setdefault("CORTEX_DATA", str(CORTEX_HOME / "data"))
+
+# Add src/ to Python path
+sys.path.insert(0, str(CORTEX_HOME / "src"))
+sys.path.insert(0, str(CORTEX_HOME))
+
+# Delegate to the main entry point
+from src.__main__ import main
+
+if __name__ == "__main__":
+    main()

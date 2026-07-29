@@ -1,0 +1,146 @@
+{
+  "L0": {
+    "label": "L0 \u2014 Reflex/Router",
+    "os_role": "reflex/router",
+    "param_range": "0.5B\u20131B",
+    "param_min_b": 0.5,
+    "param_max_b": 1.0,
+    "capabilities": [
+      "classify intent",
+      "select mode/tier",
+      "detect danger/safety",
+      "simple JSON extraction",
+      "yes/no decisions"
+    ],
+    "vram_min_mb": 500,
+    "ttft_target_ms": 10,
+    "always_hot": true,
+    "local": true
+  },
+  "L1": {
+    "label": "L1 \u2014 Tiny Syscall Agent",
+    "os_role": "tiny syscall agent",
+    "param_range": "1B\u20132B",
+    "param_min_b": 1.0,
+    "param_max_b": 2.0,
+    "capabilities": [
+      "narrow tool calls",
+      "shell-safe commands",
+      "summarization",
+      "local memory lookup",
+      "simple reformatting"
+    ],
+    "vram_min_mb": 1000,
+    "ttft_target_ms": 20,
+    "always_hot": true,
+    "local": true
+  },
+  "L2": {
+    "label": "L2 \u2014 Always-Hot Local Agent",
+    "os_role": "always-hot local agent",
+    "param_range": "3B\u20134B",
+    "param_min_b": 3.0,
+    "param_max_b": 4.0,
+    "capabilities": [
+      "10\u201325 clean tools",
+      "file operations",
+      "simple code edits",
+      "email/calendar drafts",
+      "structured extraction"
+    ],
+    "vram_min_mb": 2000,
+    "ttft_target_ms": 40,
+    "always_hot": true,
+    "local": true
+  },
+  "L3": {
+    "label": "L3 \u2014 Primary Local OS Agent",
+    "os_role": "primary local OS agent",
+    "param_range": "7B\u20138B",
+    "param_min_b": 7.0,
+    "param_max_b": 8.0,
+    "capabilities": [
+      "20\u201350 tools with validation",
+      "coding",
+      "recovery from errors",
+      "multi-step tasks",
+      "context-aware routing"
+    ],
+    "vram_min_mb": 4500,
+    "ttft_target_ms": 60,
+    "always_hot": false,
+    "local": true
+  },
+  "L4": {
+    "label": "L4 \u2014 Heavy Local Reasoner",
+    "os_role": "heavy local reasoner",
+    "param_range": "12B\u201314B",
+    "param_min_b": 12.0,
+    "param_max_b": 14.0,
+    "capabilities": [
+      "harder debugging",
+      "planning",
+      "more reliable code/tool repair",
+      "complex multi-step reasoning",
+      "document analysis"
+    ],
+    "vram_min_mb": 8000,
+    "ttft_target_ms": 100,
+    "always_hot": false,
+    "local": true
+  },
+  "L5": {
+    "label": "L5 \u2014 Local Frontier-ish",
+    "os_role": "local frontier-ish",
+    "param_range": "30B\u201332B",
+    "param_min_b": 30.0,
+    "param_max_b": 32.0,
+    "capabilities": [
+      "best local reasoning",
+      "complex analysis",
+      "long-form generation",
+      "multi-domain expertise",
+      "nuanced judgment"
+    ],
+    "vram_min_mb": 18000,
+    "ttft_target_ms": 200,
+    "always_hot": false,
+    "local": true
+  },
+  "L6": {
+    "label": "L6 \u2014 Workstation Model",
+    "os_role": "workstation model",
+    "param_range": "64B\u201370B",
+    "param_min_b": 64.0,
+    "param_max_b": 70.0,
+    "capabilities": [
+      "strong local assistant",
+      "frontier-adjacent quality",
+      "complex code generation",
+      "deep analysis",
+      "multi-turn complex tasks"
+    ],
+    "vram_min_mb": 40000,
+    "ttft_target_ms": 400,
+    "always_hot": false,
+    "local": true
+  },
+  "L7": {
+    "label": "L7 \u2014 Remote Frontier",
+    "os_role": "escalation only",
+    "param_range": "remote frontier",
+    "param_min_b": 0,
+    "param_max_b": 0,
+    "capabilities": [
+      "when local confidence/evals fail",
+      "highest quality reasoning",
+      "novel/ambiguous tasks",
+      "safety-critical decisions",
+      "frontier-only capabilities"
+    ],
+    "vram_min_mb": 0,
+    "ttft_target_ms": 500,
+    "always_hot": false,
+    "local": false
+  }
+}

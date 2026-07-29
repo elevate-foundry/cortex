@@ -1,0 +1,25 @@
+# macOS
+._*
+.DS_Store
+__pycache__/
+*.pyc
+
+# Python
+.venv/
+*.egg-info/
+
+# Logs & runtime state
+logs/
+state/
+
+# Generated data (too large for git)
+data/distill_full/
+data/distill/*.jsonl
+
+# Audio samples
+*.wav
+
+# Models (binary weights)
+models/*.bin
+models/*.gguf
+models/*.ctf

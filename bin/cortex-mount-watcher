@@ -1,0 +1,61 @@
+#!/bin/bash
+# cortex-mount-watcher — launched by launchd when /Volumes/CORTEX mounts.
+# Wakes Cortex from sleep, merges dream data, starts the daemon.
+
+set -euo pipefail
+
+CORTEX_HOME="/Volumes/CORTEX/cortex"
+VENV="$CORTEX_HOME/.venv/bin/python3"
+LOG="$CORTEX_HOME/logs/daemon.log"
+PID_FILE="$CORTEX_HOME/logs/daemon.pid"
+
+# Bail if the drive isn't actually mounted
+if [ ! -d "$CORTEX_HOME/src" ]; then
+    exit 0
+fi
+
+# Bail if already running
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    exit 0
+fi
+
+# Run the wake lifecycle transition (merge dream data, restore state)
+"$VENV" -c "
+import sys
+sys.path.insert(0, '$CORTEX_HOME')
+from src.lifecycle import wake
+checkpoint = wake()
+if checkpoint:
+    print(f'  Resumed: boot #{checkpoint.boot_count}')
+" >> "$LOG" 2>&1 || true
+
+# Announce boot via macOS speech
+say "Cortex waking up" &
+
+# Start daemon
+export CORTEX_HOME
+cd "$CORTEX_HOME"
+nohup "$VENV" -m src daemon --port 11411 >> "$LOG" 2>&1 &
+DAEMON_PID=$!
+echo "$DAEMON_PID" > "$PID_FILE"
+
+# Wait for daemon to be healthy (up to 15s)
+for i in $(seq 1 30); do
+    if curl -sf http://localhost:11411/health > /dev/null 2>&1; then
+        # Announce ready with model count
+        MODELS=$(curl -s http://localhost:11411/health | python3 -c "import sys,json; print(json.load(sys.stdin).get('models_ready',0))" 2>/dev/null || echo "?")
+        say "Cortex ready. ${MODELS} models loaded." &
+
+        # Play morse code for "CX" (Cortex) via terminal beeps
+        "$VENV" -c "
+from src.notify import morse_beep
+morse_beep('CX')
+" 2>/dev/null || true
+
+        exit 0
+    fi
+    sleep 0.5
+done
+
+say "Cortex failed to start. Check logs." &
+exit 1
