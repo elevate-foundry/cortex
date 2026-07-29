@@ -506,6 +506,8 @@ class DaemonServer:
                     category = cortex_resp.route_decision.category.value
                     confidence = cortex_resp.confidence
                     escalation_path = cortex_resp.escalation_path
+                    tokens_prompt = cortex_resp.tokens_prompt
+                    tokens_completion = cortex_resp.tokens_completion
                 else:
                     routed_tier = ""
                     actual_model = ""
@@ -522,6 +524,10 @@ class DaemonServer:
                     "total_ms": round(cortex_resp.total_ms, 1) if cortex_resp else 0.0,
                     "thread_id": thread_id,
                     "tool_rounds": tool_rounds,
+                    "tokens_prompt": tokens_prompt,
+                    "tokens_completion": tokens_completion,
+                    "cost_usd": cortex_resp.cost_usd if cortex_resp else 0.0,
+                    "provider": cortex_resp.provider if cortex_resp else "",
                 }
 
                 formatted = format_response(
@@ -599,6 +605,13 @@ class DaemonServer:
         except Exception:
             pass  # never fail a request due to gossip
 
+        # Extract cost from cortex response if available
+        cost_usd = 0.0
+        provider_name = ""
+        if not stream and cortex_resp is not None:
+            cost_usd = cortex_resp.cost_usd
+            provider_name = cortex_resp.provider
+
         self.memory.log_request(
             thread_id=thread_id,
             request_model=normalized.model,
@@ -614,6 +627,8 @@ class DaemonServer:
             app_id=app_id,
             escalation_path=escalation_path,
             error=error_msg,
+            cost_usd=cost_usd,
+            provider=provider_name,
         )
 
     async def _run_tool_loop(

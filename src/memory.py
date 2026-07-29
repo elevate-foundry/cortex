@@ -135,6 +135,8 @@ class AuditEntry:
     app_id: str = ""
     escalation_path: str = ""  # JSON list of escalation steps
     error: str = ""
+    cost_usd: float = 0.0    # actual cost from provider
+    provider: str = ""       # upstream provider (Together, Fireworks, etc.)
     created_at: int = 0
 
 
@@ -225,6 +227,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     app_id            TEXT NOT NULL DEFAULT '',
     escalation_path   TEXT NOT NULL DEFAULT '[]',
     error             TEXT NOT NULL DEFAULT '',
+    cost_usd          REAL NOT NULL DEFAULT 0,
+    provider          TEXT NOT NULL DEFAULT '',
     created_at        INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_time     ON audit_log(created_at);
@@ -412,6 +416,15 @@ class Memory:
     def _init_schema(self):
         """Create tables if they don't exist."""
         self._conn.executescript(SCHEMA_SQL)
+        # Migrate: add cost columns if missing (safe to run repeatedly)
+        try:
+            self._conn.execute("ALTER TABLE audit_log ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            self._conn.execute("ALTER TABLE audit_log ADD COLUMN provider TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         # Set schema version
         self._conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
@@ -679,6 +692,8 @@ class Memory:
         app_id: str = "",
         escalation_path: Optional[list[str]] = None,
         error: str = "",
+        cost_usd: float = 0.0,
+        provider: str = "",
     ) -> AuditEntry:
         """Log an API request to the audit log."""
         now = _now_ms()
@@ -699,6 +714,8 @@ class Memory:
             app_id=app_id,
             escalation_path=json.dumps(escalation_path or []),
             error=error,
+            cost_usd=cost_usd,
+            provider=provider,
             created_at=now,
         )
         with self._tx() as c:
@@ -707,14 +724,14 @@ class Memory:
                    (id, thread_id, request_model, routed_tier, actual_model,
                     category, confidence, tokens_prompt, tokens_completion,
                     latency_ms, ttft_ms, status_code, client_ip, app_id,
-                    escalation_path, error, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    escalation_path, error, cost_usd, provider, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (entry.id, entry.thread_id, entry.request_model,
                  entry.routed_tier, entry.actual_model, entry.category,
                  entry.confidence, entry.tokens_prompt, entry.tokens_completion,
                  entry.latency_ms, entry.ttft_ms, entry.status_code,
                  entry.client_ip, entry.app_id, entry.escalation_path,
-                 entry.error, entry.created_at),
+                 entry.error, entry.cost_usd, entry.provider, entry.created_at),
             )
             # Update daily usage
             date_str = time.strftime("%Y-%m-%d")

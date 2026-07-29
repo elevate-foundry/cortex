@@ -314,6 +314,8 @@ def _format_chat_completions(
     model_used: str = "",
 ) -> dict:
     """Standard OpenAI Chat Completions response."""
+    tp = routing_meta.get("tokens_prompt", 0) if routing_meta else 0
+    tc = routing_meta.get("tokens_completion", 0) if routing_meta else 0
     resp = {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
@@ -330,9 +332,9 @@ def _format_chat_completions(
             }
         ],
         "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
+            "prompt_tokens": tp,
+            "completion_tokens": tc,
+            "total_tokens": tp + tc,
         },
     }
     if routing_meta:

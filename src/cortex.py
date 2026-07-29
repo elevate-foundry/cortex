@@ -68,6 +68,13 @@ class CortexResponse:
     escalation_path: list[str] = field(default_factory=list)
     total_ms: float = 0.0
     raw_response: Optional[dict] = None  # full raw backend response (for tool calls)
+    # Usage telemetry
+    tokens_prompt: int = 0
+    tokens_completion: int = 0
+    tokens_cached: int = 0
+    tokens_reasoning: int = 0
+    cost_usd: float = 0.0
+    provider: str = ""
 
 class Cortex:
     """
@@ -239,6 +246,12 @@ class Cortex:
             escalation_path=escalation_path,
             total_ms=total_ms,
             raw_response=core_response.raw,
+            tokens_prompt=core_response.tokens_prompt,
+            tokens_completion=core_response.tokens_completion,
+            tokens_cached=core_response.tokens_cached,
+            tokens_reasoning=core_response.tokens_reasoning,
+            cost_usd=core_response.cost_usd,
+            provider=core_response.provider,
         )
 
         # Self-audit: log routing decision to Memory if available
@@ -444,6 +457,12 @@ class Cortex:
             escalation_path=[f"explicit_model→{model}"],
             total_ms=total_ms,
             raw_response=resp.raw,
+            tokens_prompt=resp.tokens_prompt,
+            tokens_completion=resp.tokens_completion,
+            tokens_cached=resp.tokens_cached,
+            tokens_reasoning=resp.tokens_reasoning,
+            cost_usd=resp.cost_usd,
+            provider=resp.provider,
         )
 
     # ------------------------------------------------------------------
