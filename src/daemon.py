@@ -170,7 +170,13 @@ class DaemonServer:
             max_t = str(max_feasible_tier(self.profile).name)
             n_models = len(mgr_status.get("models", []))
             has_cloud = bool(os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY"))
-            boot_announce(models_loaded=n_models, max_tier=max_t, cloud_available=has_cloud)
+            model_ids = [m["model_id"] for m in mgr_status.get("models", []) if m["state"] == "ready"]
+            boot_announce(
+                models_loaded=n_models,
+                max_tier=max_t,
+                cloud_available=has_cloud,
+                model_names=model_ids,
+            )
         except Exception as e:
             logger.debug("Boot announce skipped: %s", e)
 

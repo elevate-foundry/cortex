@@ -16,6 +16,7 @@ import struct
 import subprocess
 import math
 import tempfile
+from typing import Optional
 import time
 from pathlib import Path
 
@@ -176,16 +177,35 @@ def notify(title: str, body: str) -> None:
     )
 
 
-def boot_announce(models_loaded: int = 0, max_tier: str = "?", cloud_available: bool = False) -> None:
+def boot_announce(
+    models_loaded: int = 0,
+    max_tier: str = "?",
+    cloud_available: bool = False,
+    model_names: Optional[list[str]] = None,
+) -> None:
     """
     Full boot announcement sequence:
     1. macOS notification
-    2. Speech: "Cortex online"  
+    2. Speech: "Cortex online" + model details
     3. Morse: "CX" (short identifier)
     """
     cloud_note = " Cloud L7 available." if cloud_available else ""
-    notify("Cortex", f"Daemon online — {models_loaded} models, max local tier {max_tier}{cloud_note}")
-    speak(f"Cortex online. {models_loaded} models loaded. Max local tier {max_tier}.{cloud_note}", blocking=True)
+
+    # Build model list for notification toast
+    if model_names:
+        model_list = ", ".join(model_names)
+        toast_body = f"{models_loaded} models: {model_list}. Max local {max_tier}.{cloud_note}"
+    else:
+        toast_body = f"{models_loaded} models, max local tier {max_tier}{cloud_note}"
+
+    notify("Cortex", toast_body)
+
+    # Speech: concise but informative
+    if model_names:
+        names_speech = ", ".join(n.split("/")[-1].split("-GGUF")[0].split(":")[0] for n in model_names)
+        speak(f"Cortex online. {names_speech}. Max local {max_tier}.{cloud_note}", blocking=True)
+    else:
+        speak(f"Cortex online. {models_loaded} models loaded. Max local tier {max_tier}.{cloud_note}", blocking=True)
     morse_beep("CX")
 
 
