@@ -184,7 +184,36 @@ Rules support conditions (==, !=, >, <, in, regex), compound logic (∧, ∨, ¬
 
 ## Daemon
 
-The daemon (`python -m src daemon`) is an OpenAI-compatible HTTP proxy on `localhost:11411`:
+The daemon (`python -m src daemon`) is an OpenAI-compatible HTTP proxy on `localhost:11411`.
+
+### Use with any OpenAI client
+
+Set two environment variables and every tool that speaks the OpenAI protocol will route through Cortex:
+
+```bash
+export OPENAI_BASE_URL=http://localhost:11411/v1
+export OPENAI_API_KEY=local   # any non-empty string works
+```
+
+That's it. Now these all work through Cortex:
+
+| Tool | Works? | Notes |
+|------|--------|-------|
+| **Cursor** | ✅ | Settings → Models → OpenAI → Base URL |
+| **VS Code + Continue** | ✅ | Set in `config.json` |
+| **Cline** | ✅ | API provider → OpenAI Compatible |
+| **aider** | ✅ | `aider --openai-api-base http://localhost:11411/v1` |
+| **Open WebUI** | ✅ | Add as OpenAI connection |
+| **LangChain** | ✅ | `ChatOpenAI(base_url="http://localhost:11411/v1")` |
+| **Python OpenAI SDK** | ✅ | `openai.OpenAI(base_url="http://localhost:11411/v1")` |
+
+**Routing behavior:**
+- `"model": "auto"` or omit → Cortex picks the best local model for the task
+- `"model": "qwen/qwen3-8b"` → routes to OpenRouter (cloud, streaming)
+- `"model": "deepseek/deepseek-r1"` → routes to OpenRouter (cloud, streaming)
+- No model specified → routes locally (Ollama L0–L2, always hot)
+
+### API Examples
 
 ```bash
 # Chat completion (routes automatically)
@@ -192,12 +221,22 @@ curl http://localhost:11411/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "auto", "messages": [{"role": "user", "content": "hello"}]}'
 
-# Streaming
+# Streaming (local)
 curl http://localhost:11411/v1/chat/completions \
-  -d '{"model": "auto", "stream": true, "messages": [...]}'
+  -d '{"stream": true, "messages": [{"role": "user", "content": "hello"}]}'
 
-# Status
-curl http://localhost:11411/v1/status
+# Streaming (cloud — explicit model)
+curl http://localhost:11411/v1/chat/completions \
+  -d '{"model": "qwen/qwen3-8b", "stream": true, "messages": [{"role": "user", "content": "hello"}]}'
+
+# Cost dashboard
+curl http://localhost:11411/v1/usage/cost
+
+# Available backends
+curl http://localhost:11411/v1/backends
+
+# Health check
+curl http://localhost:11411/health
 ```
 
 Background tasks running inside the daemon:
